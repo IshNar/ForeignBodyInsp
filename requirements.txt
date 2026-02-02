@@ -1,0 +1,5 @@
+opencv-python-headless
+pypylon
+PyQt6
+numpy
+scikit-image
