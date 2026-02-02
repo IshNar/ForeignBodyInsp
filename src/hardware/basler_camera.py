@@ -8,9 +8,11 @@ except ImportError:
 class BaslerCamera(CameraSource):
     def __init__(self):
         self.camera = None
-        self.converter = pylon.ImageFormatConverter()
-        self.converter.OutputPixelFormat = pylon.PixelType_BGR8packed
-        self.converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
+        self.converter = None
+        if pylon is not None:
+            self.converter = pylon.ImageFormatConverter()
+            self.converter.OutputPixelFormat = pylon.PixelType_BGR8packed
+            self.converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
 
     def open(self):
         if pylon is None:
