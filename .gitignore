@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.jpg
+*.png
+!test_sample.jpg
+!Ext-5_#1.jpg
+!image.png
+!광학계 사양.jpg
