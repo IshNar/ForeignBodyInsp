@@ -1,0 +1,174 @@
+===========================================
+Vial Foreign Body Inspection System
+개발 히스토리
+===========================================
+
+날짜: 2026-02-05 (목)
+개발자: AI Assistant
+
+-------------------------------------------
+[UI 개선 - Settings]
+시간: 초기 개발
+요청사항: Settings 섹션의 Threshold와 MinArea ProgressBar(슬라이더)에 현재 값을 표시
+구현내용:
+- 슬라이더 위에 현재 값을 표시하는 QLabel 추가
+- valueChanged 시그널로 실시간 값 업데이트
+- 파란색 굵은 글씨로 값 표시
+
+-------------------------------------------
+[환경 설정 - 의존성 해결]
+시간: 초기 개발
+요청사항: PyQt6 ModuleNotFoundError 해결
+구현내용:
+- requirements.txt에 PyQt6 포함 확인
+- pip install PyQt6 필요
+
+-------------------------------------------
+[UI 개선 - Result 및 Defect View]
+시간: 초기 개발
+요청사항: 
+1. Result 리스트 항목 클릭 시 하이라이트 표시
+2. 우측에 ImageView 창 추가하여 선택한 Defect을 확대 표시
+구현내용:
+- Result 리스트에 SingleSelection 모드 적용
+- 선택 항목 하이라이트 스타일 추가 (파란 배경/흰 글자)
+- Defect View 그룹박스 추가 (260x260 픽셀)
+- 선택한 Defect의 ROI를 확대하여 표시
+- itemSelectionChanged 시그널로 DefectView 자동 업데이트
+
+-------------------------------------------
+[UI 개선 - 이미지 로딩]
+시간: 초기 개발
+요청사항:
+1. Drag & Drop으로 이미지 로딩 기능 추가
+2. 큰 이미지 로딩 시 Dialog 창 크기가 변하지 않도록 설정
+3. MainView에서 Ctrl+마우스휠로 확대/축소 기능 추가
+구현내용:
+- dragEnterEvent, dragMoveEvent, dropEvent 구현
+- .png, .jpg, .jpeg, .bmp 파일 지원
+- QScrollArea로 이미지 뷰 감싸서 큰 이미지도 스크롤로 표시
+- eventFilter에서 Ctrl+Wheel 이벤트 감지하여 줌 기능 구현
+- 줌 범위: 0.2x ~ 6.0x
+
+-------------------------------------------
+[버그 수정 - Drag & Drop]
+시간: 초기 개발
+요청사항: Drag & Drop 시 금지 아이콘 표시 문제 해결
+구현내용:
+- 모든 하위 위젯에 setAcceptDrops(True) 설정
+- eventFilter에 드래그 이벤트 핸들링 추가
+- setDropAction(Qt.DropAction.CopyAction) 명시적 설정
+- 여러 위젯(central_widget, splitter, scroll 등)에 이벤트 필터 추가
+※ 완전 해결되지 않아 우선순위 낮춤
+
+-------------------------------------------
+[성능 최적화 - 확대/축소]
+시간: 초기 개발
+요청사항: 확대/축소 시 버벅임 및 이미지 블러 문제 해결
+구현내용:
+- 원본 프레임 전체를 유지하여 선명도 보장
+- render_main_view()에서 줌 배율에 따라 ROI 크롭 후 뷰포트 크기로 리사이즈
+- 축소 시 INTER_AREA, 확대 시 INTER_CUBIC 보간법 사용
+- 다운스케일 방식 제거하고 원본 해상도 유지
+
+-------------------------------------------
+[UI 개선 - 패닝 기능]
+시간: 초기 개발
+요청사항: 확대 상태에서 마우스 클릭+드래그로 이미지 이동(패닝) 기능 추가
+구현내용:
+- 마우스 드래그 이벤트 핸들링 추가
+- view_cx, view_cy로 뷰 중심 좌표 관리
+- 드래그 시 마우스 이동량을 이미지 좌표로 변환하여 중심 이동
+- 이미지 경계를 벗어나지 않도록 클램핑 처리
+
+-------------------------------------------
+[버그 수정 - Import 에러]
+시간: 초기 개발
+요청사항: main_window.py 직접 실행(F5) 시 ModuleNotFoundError 해결
+구현내용:
+- main_window.py 상단에 프로젝트 루트를 sys.path에 추가
+- ROOT_DIR 계산 및 sys.path.append() 로직 추가
+
+-------------------------------------------
+[버그 수정 - 프로그램 다운]
+시간: 초기 개발
+요청사항: Start Inspection 버튼 클릭 시 프로그램 크래시 해결
+구현내용:
+- update_defect_view()에서 ROI 경계 검증 강화
+- 0 나누기 방지 체크 추가
+- np.ascontiguousarray()로 메모리 연속성 보장 (QImage 생성 시 필수)
+- render_main_view()에도 동일한 안전장치 추가
+
+-------------------------------------------
+[버그 수정 - Result 선택 유지]
+시간: 중기 개발
+요청사항: 
+1. Result에서 다른 항목 클릭 시 원래 위치로 되돌아가는 문제 해결
+2. Defect View를 원본 버퍼에서 추출하도록 개선
+구현내용:
+- update_frame()에서 매번 view center를 리셋하지 않고 초기화 시에만 설정
+- 새 이미지 로드/카메라 연결 시에만 view center와 zoom 리셋
+- Defect View ROI를 Defect 크기의 2배로 변경 (기존: +200픽셀)
+- 최소 크기 50픽셀 보장
+- original_frame_full에 원본 프레임 저장하여 DefectView 추출 시 사용
+
+-------------------------------------------
+[UI 개선 - Result 리스트 안정화]
+시간: 중기 개발
+요청사항: 
+1. Result 리스트에서 스크롤바 드래그 시 선택 원복 문제 해결
+2. DefectView ROI 최소 크기를 150x150 픽셀로 설정
+구현내용:
+- list_results.clear() 대신 기존 아이템 텍스트 업데이트 방식으로 변경
+- blockSignals(True/False)로 업데이트 중 selection change 이벤트 차단
+- 아이템 개수 변경 시만 추가/삭제 수행
+- DefectView ROI 최소 크기를 150x150 픽셀로 증가
+
+-------------------------------------------
+[UI 개선 - Defect 선택 하이라이트]
+시간: 후기 개발
+요청사항:
+1. Result에서 Defect 클릭 시 ImageView에서 노란색으로 하이라이트
+2. ImageView에서 Defect 클릭 시 Result 리스트 선택 및 DefectView 표시
+구현내용:
+- display_base_frame: 모든 contour를 빨간색으로 그린 기본 프레임 저장
+- redraw_with_highlight(): 선택된 contour만 노란색(0,255,255)으로 두껍게 강조
+- on_selection_changed(): 선택 변경 시 하이라이트 및 DefectView 자동 업데이트
+- handle_image_click(): ImageView 클릭 위치에서 contour 찾기
+- view_to_image_coords(): 뷰포트 좌표를 원본 이미지 좌표로 변환 (줌/패닝 고려)
+- cv2.pointPolygonTest()로 클릭한 점이 어느 contour 내부인지 판단
+- 마우스 릴리스 시 드래그 거리 체크 (5픽셀 미만이면 클릭으로 판단)
+
+===========================================
+주요 기능 요약
+===========================================
+
+[이미지 입력]
+- Basler 카메라 연결
+- 파일 로드 (다이얼로그)
+- Drag & Drop 이미지 로드
+
+[검사 기능]
+- Start/Stop Inspection
+- Threshold 조정 (0~255)
+- Min Area 조정 (0~500)
+- Adaptive Threshold 옵션
+
+[결과 표시]
+- Result 리스트: 검출된 Defect 목록 (분류, 면적)
+- ImageView: 전체 이미지 + 빨간색 contour + 노란색 선택 하이라이트
+- DefectView: 선택한 Defect의 확대 이미지 (원본 해상도, 최소 150x150)
+
+[뷰어 조작]
+- Ctrl+마우스휠: 확대/축소 (0.2x ~ 6.0x)
+- 좌클릭+드래그: 패닝 (이미지 이동)
+- Defect 클릭: 해당 Defect 선택 및 상세 보기
+
+[성능 최적화]
+- 원본 해상도 유지로 선명도 보장
+- ROI 크롭 방식으로 빠른 렌더링
+- 비연속 배열 처리로 안정성 확보
+
+===========================================
+End of History
+===========================================
