@@ -1,0 +1,33 @@
+{
+  "classification": {
+    "noise_contrast_threshold": 23,
+    "threshold": 240,
+    "min_area": 10,
+    "use_adaptive": true,
+    "open_kernel": 3,
+    "close_kernel": 3,
+    "general_enabled": true,
+    "classification_enabled": true
+  },
+  "bubble_detection": {
+    "enabled": true,
+    "bg_open_ksize": 50,
+    "bg_smooth_sigma": 15.0,
+    "use_clahe": false,
+    "clahe_clip": 9.0,
+    "clahe_grid": 8,
+    "denoise_mode": "median",
+    "median_ksize": 3,
+    "sigma_small": 0.4,
+    "sigma_large": 18.0,
+    "thr_k": 3.5,
+    "morph_close_size": 7,
+    "morph_open_size": 7,
+    "min_diameter": 2,
+    "max_diameter": 300,
+    "circularity_min": 0.0,
+    "solidity_min": 0.0,
+    "max_aspect_ratio": 10.0,
+    "bubble_show_text": true
+  }
+}

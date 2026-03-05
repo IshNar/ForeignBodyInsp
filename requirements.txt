@@ -3,3 +3,6 @@ pypylon
 PyQt6
 numpy
 scikit-image
+torch
+torchvision
+ultralytics

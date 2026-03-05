@@ -3,171 +3,509 @@ Vial Foreign Body Inspection System
 개발 히스토리
 ===========================================
 
+※ 이 문서는 "무슨 기능을 왜 넣었는지" 나중에 다시 봐도 이해할 수 있도록
+  요약과 배경 설명을 붙여 두었습니다.
+
 날짜: 2026-02-05 (목)
 개발자: AI Assistant
 
 -------------------------------------------
-[UI 개선 - Settings]
-시간: 초기 개발
-요청사항: Settings 섹션의 Threshold와 MinArea ProgressBar(슬라이더)에 현재 값을 표시
-구현내용:
-- 슬라이더 위에 현재 값을 표시하는 QLabel 추가
-- valueChanged 시그널로 실시간 값 업데이트
-- 파란색 굵은 글씨로 값 표시
+[UI 개선 - Settings] 
+"Threshold / Min Area 슬라이더에 숫자가 보이게"
+-------------------------------------------
+상황: Threshold(이진화 임계값), Min Area(최소 면적) 슬라이더를 움직여도 현재 값이 안 보여서 불편함.
+한 일:
+- 슬라이더 위에 현재 값을 보여주는 레이블(QLabel) 추가
+- 슬라이더를 움직일 때마다(valueChanged) 그 숫자를 갱신
+- 파란색 굵은 글씨로 보이게 스타일 지정
 
 -------------------------------------------
-[환경 설정 - 의존성 해결]
-시간: 초기 개발
-요청사항: PyQt6 ModuleNotFoundError 해결
-구현내용:
-- requirements.txt에 PyQt6 포함 확인
-- pip install PyQt6 필요
+[환경 설정 - 의존성]
+"PyQt6 없다고 할 때"
+-------------------------------------------
+상황: 프로그램 실행 시 PyQt6를 찾을 수 없다는 에러 발생.
+한 일:
+- requirements.txt에 PyQt6가 들어 있는지 확인
+- 없으면 터미널에서 pip install PyQt6 (또는 pip install -r requirements.txt) 실행하면 됨을 안내
 
 -------------------------------------------
 [UI 개선 - Result 및 Defect View]
-시간: 초기 개발
-요청사항: 
-1. Result 리스트 항목 클릭 시 하이라이트 표시
-2. 우측에 ImageView 창 추가하여 선택한 Defect을 확대 표시
-구현내용:
-- Result 리스트에 SingleSelection 모드 적용
-- 선택 항목 하이라이트 스타일 추가 (파란 배경/흰 글자)
-- Defect View 그룹박스 추가 (260x260 픽셀)
-- 선택한 Defect의 ROI를 확대하여 표시
-- itemSelectionChanged 시그널로 DefectView 자동 업데이트
+"검출 목록 클릭 시 강조 + 선택한 것만 크게 보기"
+-------------------------------------------
+상황: 검사 결과(Result) 리스트에서 항목을 눌러도 어느 Defect(이물)인지 화면에서 구분이 잘 안 됨. 선택한 걸 따로 크게 보고 싶음.
+한 일:
+- Result 리스트: 한 번에 하나만 선택되도록(SingleSelection), 선택된 행은 파란 배경/흰 글씨로 강조
+- Defect View: 오른쪽에 260x260 픽셀 영역을 두고, 선택한 Defect 부분만 잘라서 확대 표시
+- 리스트 선택이 바뀔 때마다(itemSelectionChanged) Defect View가 자동으로 그 Defect 영역을 보여주도록 연결
 
 -------------------------------------------
 [UI 개선 - 이미지 로딩]
-시간: 초기 개발
-요청사항:
-1. Drag & Drop으로 이미지 로딩 기능 추가
-2. 큰 이미지 로딩 시 Dialog 창 크기가 변하지 않도록 설정
-3. MainView에서 Ctrl+마우스휠로 확대/축소 기능 추가
-구현내용:
-- dragEnterEvent, dragMoveEvent, dropEvent 구현
-- .png, .jpg, .jpeg, .bmp 파일 지원
-- QScrollArea로 이미지 뷰 감싸서 큰 이미지도 스크롤로 표시
-- eventFilter에서 Ctrl+Wheel 이벤트 감지하여 줌 기능 구현
-- 줌 범위: 0.2x ~ 6.0x
+"드래그로 이미지 넣기 + 창 크기 고정 + Ctrl+휠 줌"
+-------------------------------------------
+상황: 이미지를 끌어다 넣고 싶고, 큰 이미지를 불러와도 창이 막 넓어지지 않았으면 함. 확대/축소는 Ctrl+마우스휠로 하고 싶음.
+한 일:
+- 드래그 앤 드롭(dragEnterEvent, dropEvent 등)으로 .png, .jpg, .jpeg, .bmp 파일 로드
+- 이미지 뷰를 QScrollArea로 감싸서, 큰 이미지는 스크롤만 되고 창 크기는 그대로
+- Ctrl 누른 채 마우스휠: 확대/축소 (0.2배 ~ 6배)
 
 -------------------------------------------
 [버그 수정 - Drag & Drop]
-시간: 초기 개발
-요청사항: Drag & Drop 시 금지 아이콘 표시 문제 해결
-구현내용:
-- 모든 하위 위젯에 setAcceptDrops(True) 설정
-- eventFilter에 드래그 이벤트 핸들링 추가
-- setDropAction(Qt.DropAction.CopyAction) 명시적 설정
-- 여러 위젯(central_widget, splitter, scroll 등)에 이벤트 필터 추가
-※ 완전 해결되지 않아 우선순위 낮춤
+"드래그할 때 금지 표시 나오는 문제"
+-------------------------------------------
+상황: 이미지를 창 위로 끌고 가면 커서에 "금지" 아이콘(빨간 동그라미)이 떠서 드롭이 안 되는 것처럼 보임.
+한 일:
+- 드래그를 받을 수 있게 메인 창·스크롤·이미지 라벨·컨트롤 패널·스플리터 등에 setAcceptDrops(True) 설정
+- 드롭 시 "복사" 동작으로 처리하라고 setDropAction(CopyAction) 명시
+- 여러 위젯에 이벤트 필터를 걸어서, 메인 창의 드래그 처리 로직이 이벤트를 받도록 연결
+※ PC/OS에 따라 완전히 사라지지 않을 수 있어서 우선순위는 낮게 둠
 
 -------------------------------------------
 [성능 최적화 - 확대/축소]
-시간: 초기 개발
-요청사항: 확대/축소 시 버벅임 및 이미지 블러 문제 해결
-구현내용:
-- 원본 프레임 전체를 유지하여 선명도 보장
-- render_main_view()에서 줌 배율에 따라 ROI 크롭 후 뷰포트 크기로 리사이즈
-- 축소 시 INTER_AREA, 확대 시 INTER_CUBIC 보간법 사용
-- 다운스케일 방식 제거하고 원본 해상도 유지
+"줌 할 때 버벅이고 흐릿해지는 문제"
+-------------------------------------------
+상황: 확대/축소를 하면 화면이 버벅이거나 이미지가 흐릿해짐.
+한 일:
+- 원본 이미지(프레임) 전체를 메모리에 두고, 화면에 그릴 때만 "지금 보이는 구간"을 잘라서(ROI 크롭) 뷰 크기에 맞게 리사이즈해서 표시. 이렇게 하면 선명도 유지.
+- 축소할 때: INTER_AREA 보간 (축소에 적합). 확대할 때: INTER_CUBIC (당시 사용). 나중에 확대는 INTER_NEAREST로 바꿔 픽셀 블록처럼 보이게 함(아래 항목 참고).
 
 -------------------------------------------
-[UI 개선 - 패닝 기능]
-시간: 초기 개발
-요청사항: 확대 상태에서 마우스 클릭+드래그로 이미지 이동(패닝) 기능 추가
-구현내용:
-- 마우스 드래그 이벤트 핸들링 추가
-- view_cx, view_cy로 뷰 중심 좌표 관리
-- 드래그 시 마우스 이동량을 이미지 좌표로 변환하여 중심 이동
-- 이미지 경계를 벗어나지 않도록 클램핑 처리
+[UI 개선 - 패닝]
+"확대한 상태에서 화면 쭉쭉 밀기"
+-------------------------------------------
+상황: 많이 확대해 두면 다른 부분을 보려면 마우스로 화면을 이동(패닝)하고 싶음.
+한 일:
+- 뷰의 "중심 좌표"(view_cx, view_cy)를 두고, 마우스로 드래그한 만큼 그 중심을 이동
+- 이동량을 이미지 좌표로 환산해서 적용하고, 이미지 밖으로 나가지 않도록 경계에서 멈추게 처리
 
 -------------------------------------------
 [버그 수정 - Import 에러]
-시간: 초기 개발
-요청사항: main_window.py 직접 실행(F5) 시 ModuleNotFoundError 해결
-구현내용:
-- main_window.py 상단에 프로젝트 루트를 sys.path에 추가
-- ROOT_DIR 계산 및 sys.path.append() 로직 추가
+"main_window.py만 F5로 실행하면 모듈을 못 찾을 때"
+-------------------------------------------
+상황: main_window.py 파일을 직접 실행(F5)하면 "src 모듈을 찾을 수 없음" 같은 에러 발생.
+한 일:
+- main_window.py 맨 위에서 "프로젝트 루트" 폴더 경로를 계산해서 sys.path에 넣어 주는 코드 추가 (그래야 import src... 가 동작)
+- 또는, 항상 프로젝트 루트에서 python src/main.py 로 실행하는 방식을 권장
 
 -------------------------------------------
 [버그 수정 - 프로그램 다운]
-시간: 초기 개발
-요청사항: Start Inspection 버튼 클릭 시 프로그램 크래시 해결
-구현내용:
-- update_defect_view()에서 ROI 경계 검증 강화
-- 0 나누기 방지 체크 추가
-- np.ascontiguousarray()로 메모리 연속성 보장 (QImage 생성 시 필수)
-- render_main_view()에도 동일한 안전장치 추가
+"Start Inspection 누르면 프로그램이 죽을 때"
+-------------------------------------------
+상황: 검사 시작 버튼을 누르면 프로그램이 크래시(종료)됨.
+한 일:
+- Defect View에 넣을 이미지(ROI 잘라낸 부분)를 만들 때, 경계를 벗어나는 인덱스·0으로 나누기 등이 없도록 검사 추가
+- QImage에 넣을 배열은 "연속된 메모리"여야 하므로, np.ascontiguousarray()로 한 번 감싸서 넘기도록 수정
+- 메인 뷰를 그리는 render_main_view() 쪽에도 같은 식으로 경계·연속성 검사 추가
 
 -------------------------------------------
 [버그 수정 - Result 선택 유지]
-시간: 중기 개발
-요청사항: 
-1. Result에서 다른 항목 클릭 시 원래 위치로 되돌아가는 문제 해결
-2. Defect View를 원본 버퍼에서 추출하도록 개선
-구현내용:
-- update_frame()에서 매번 view center를 리셋하지 않고 초기화 시에만 설정
-- 새 이미지 로드/카메라 연결 시에만 view center와 zoom 리셋
-- Defect View ROI를 Defect 크기의 2배로 변경 (기존: +200픽셀)
-- 최소 크기 50픽셀 보장
-- original_frame_full에 원본 프레임 저장하여 DefectView 추출 시 사용
+"다른 Defect 클릭해도 선택이 도로 돌아가는 문제"
+-------------------------------------------
+상황: Result 리스트에서 다른 항목을 클릭해도 곧바로 이전 선택으로 되돌아감. Defect View도 더 자연스럽게 보고 싶음.
+한 일:
+- 매 프레임(update_frame)마다 뷰 중심·줌을 리셋하지 않음. 새 이미지를 로드하거나 카메라를 바꿀 때만 view_cx, view_cy, zoom_factor를 초기화. 그래서 사용자가 클릭한 선택이 다음 프레임에서 덮어씌워지지 않음.
+- Defect View는 "원본 프레임(original_frame_full)"에서 해당 Defect 영역만 잘라서 표시하도록 변경. Defect 크기의 2배 정도 영역을 보여 주고, 최소 50픽셀은 되게 함 (이후 150x150으로 조정).
 
 -------------------------------------------
 [UI 개선 - Result 리스트 안정화]
-시간: 중기 개발
-요청사항: 
-1. Result 리스트에서 스크롤바 드래그 시 선택 원복 문제 해결
-2. DefectView ROI 최소 크기를 150x150 픽셀로 설정
-구현내용:
-- list_results.clear() 대신 기존 아이템 텍스트 업데이트 방식으로 변경
-- blockSignals(True/False)로 업데이트 중 selection change 이벤트 차단
-- 아이템 개수 변경 시만 추가/삭제 수행
-- DefectView ROI 최소 크기를 150x150 픽셀로 증가
+"스크롤바 움직이면 선택이 풀리는 문제"
+-------------------------------------------
+상황: Result 리스트에서 스크롤바만 움직여도 선택이 해제되거나 다른 항목이 선택된 것처럼 바뀜.
+한 일:
+- 리스트를 매번 비우고(clear) 다시 채우지 않고, 기존 항목이 있으면 글자만 setText()로 바꿔서 갱신. 항목 개수가 바뀔 때만 addItem/takeItem으로 추가·삭제.
+- 리스트를 갱신하는 동안에는 "선택이 바뀌었다"는 시그널이 나가면 안 되므로, blockSignals(True)로 막았다가 갱신 끝나면 blockSignals(False)로 풀어 줌.
+- Defect View에 보여줄 최소 크기를 150x150 픽셀로 설정.
 
 -------------------------------------------
 [UI 개선 - Defect 선택 하이라이트]
-시간: 후기 개발
-요청사항:
-1. Result에서 Defect 클릭 시 ImageView에서 노란색으로 하이라이트
-2. ImageView에서 Defect 클릭 시 Result 리스트 선택 및 DefectView 표시
-구현내용:
-- display_base_frame: 모든 contour를 빨간색으로 그린 기본 프레임 저장
-- redraw_with_highlight(): 선택된 contour만 노란색(0,255,255)으로 두껍게 강조
-- on_selection_changed(): 선택 변경 시 하이라이트 및 DefectView 자동 업데이트
-- handle_image_click(): ImageView 클릭 위치에서 contour 찾기
-- view_to_image_coords(): 뷰포트 좌표를 원본 이미지 좌표로 변환 (줌/패닝 고려)
-- cv2.pointPolygonTest()로 클릭한 점이 어느 contour 내부인지 판단
-- 마우스 릴리스 시 드래그 거리 체크 (5픽셀 미만이면 클릭으로 판단)
+"Result/화면 클릭으로 Defect 짚어 보기"
+-------------------------------------------
+상황: Result에서 클릭한 Defect가 전체 이미지에서 어디인지 노란색으로 강조되고, 반대로 이미지에서 Defect를 클릭하면 Result 선택 + Defect View가 같이 바뀌었으면 함.
+한 일:
+- "모든 검출 영역을 빨간색으로 그린 베이스 이미지"(display_base_frame)를 하나 두고, 선택된 contour(검출된 물체의 윤곽 좌표)만 노란색으로 두껍게 그리는 redraw_with_highlight() 추가.
+- Result 선택이 바뀔 때(on_selection_changed) 하이라이트와 Defect View 갱신.
+- 이미지 뷰를 클릭했을 때(handle_image_click): 클릭한 픽셀 좌표를 "원본 이미지 좌표"로 바꾼 뒤(view_to_image_coords, 줌·패닝 반영), 그 점이 어떤 contour 안에 있는지 cv2.pointPolygonTest로 찾아서 해당 항목을 선택하고 Defect View 갱신.
+- "클릭"과 "드래그" 구분: 마우스를 뗐을 때 움직인 거리가 5픽셀 미만이면 클릭으로 간주.
+
+-------------------------------------------
+[성능 개선 - 멀티스레드 검사 + MainView 표시 옵션]
+"검사할 때 화면이 멈추지 않게 + 그리기 on/off"
+-------------------------------------------
+상황: 검사(이물 검출·분류)가 무거워서 메인 화면이 멈춘 것처럼 보임. Defect 사각형·이름을 메인 뷰에 그릴지 말지 선택하고 싶음.
+한 일:
+- 검사와 "그리기"를 백그라운드 스레드(DetectionWorker, QThread)에서 하도록 분리. 결과가 나오면 시그널(result_ready)로 메인 스레드에 넘기고, 메인 스레드는 그때 화면만 갱신. 그래서 검사 중에도 UI가 멈추지 않음.
+- "MainView에 표시" 체크박스 추가: 켜면 Defect 사각형·라벨을 메인 뷰에 그림. 끄면 검사는 하되 메인 뷰에는 그리지 않음 (속도·가독성 선택용).
+
+-------------------------------------------
+[UI 개선 - 확대 배율 확장 및 1:1 줌]
+"픽셀 하나하나 보기 + 1:1 토글"
+-------------------------------------------
+상황: 이미지를 더 크게(픽셀 1:1까지) 보고 싶고, 중간 버튼 더블클릭으로 1:1 배율을 켜고 끄고 싶음.
+한 일:
+- 1:1이란 "모니터 픽셀 1개 = 이미지 픽셀 1개"로 보이는 배율. _get_zoom_1to1()로 그 배율을 계산하고, 확대 상한을 1:1의 32배까지 올림.
+- 마우스 휠 버튼(중간 버튼) 더블클릭 시: 현재 1:1이 아니면 1:1로, 1:1이면 직전 배율로 되돌리는 토글.
+
+-------------------------------------------
+[UI 개선 - 확대 시 픽셀 선명도]
+"확대하면 픽셀이 네모 블록처럼 보이게 (ImageJ 스타일)"
+-------------------------------------------
+상황: 많이 확대하면 보간 때문에 흐릿해 보임. 픽셀 경계가 뚜렷한 "블록"처럼 보였으면 함.
+한 일:
+- 확대(업스케일)할 때 보간법을 INTER_NEAREST로 변경. 인접 픽셀을 섞지 않고 그대로 키우니까 픽셀 단위로 네모나게 보임. 축소는 INTER_AREA 유지.
+
+-------------------------------------------
+[UI 개선 - Position/GrayValue]
+"창 최대화 안 해도 좌표·밝기 값이 나오게"
+-------------------------------------------
+상황: 창을 최대화하지 않으면 마우스 위치(Position)나 해당 픽셀 밝기(GrayValue)가 잘 안 나옴.
+한 일:
+- 마우스 좌표를 "전역 좌표 → 위젯 기준 좌표"로 바꿀 때 mapFromGlobal(globalPosition()) 사용. 창이 최대화든 보통 크기든 동일하게 동작하도록 수정.
+
+-------------------------------------------
+[기능 추가 - AVI/동영상 로딩 및 실시간 검사]
+"동영상 파일 불러와서 검사 + 끝나면 처음부터 반복"
+-------------------------------------------
+상황: AVI 등 동영상 파일을 불러와서 프레임마다 검사하고, 끝까지 가면 처음부터 반복 재생하고 싶음.
+한 일:
+- FileCamera에 동영상 확장자(.avi, .mp4, .mov 등) 구분 추가. 동영상이면 cv2.VideoCapture로 열고, grab_frame()에서 프레임을 순서대로 읽음.
+- 마지막 프레임까지 가면 0번 프레임으로 되돌려서(seek) 무한 루프처럼 재생.
+- 파일 열기 다이얼로그·드래그앤드롭에서 동영상 확장자 지원.
+- 동영상일 때: 33ms(약 30fps) 간격으로 타이머. 단일 이미지일 때: 100ms 간격.
+
+-------------------------------------------
+[기능 추가 - 검사 ROI 설정]
+"화면에서 영역 그려서 그 부분만 검사"
+-------------------------------------------
+상황: 전체가 아니라 이미지의 일부 영역(ROI, Region Of Interest)만 검사하고 싶음. 화면에서 마우스로 사각형을 그려서 정하고 싶음.
+한 일:
+- "검사 ROI 설정" 버튼: 누르면 메인 뷰에서 마우스로 사각형 드래그. 놓으면 "이 영역으로 할까요?" 확인 후 (x, y, w, h) 저장(inspection_roi).
+- 검사(update_frame) 시 그 영역만 잘라서(crop) 검사하고, 검출 좌표는 "ROI 기준 → 전체 이미지 기준"으로 오프셋 보정(_last_roi_offset).
+- "검사 ROI표시" 체크박스: 켜면 설정한 ROI를 초록 사각형으로 화면에 그림.
+
+-------------------------------------------
+★★★ [버그 수정 - ROI 검사 시 MainView 멈춤] ★★★
+"ROI 설정 후 검사 켜면 메인 화면만 멈추는 심각한 버그"
+-------------------------------------------
+상황: 검사 ROI를 설정한 뒤 Start Inspection을 누르면, 디버그 뷰는 갱신되는데 메인 이미지 뷰(MainView)만 멈춰서 더 이상 안 바뀜.
+
+[원인 1 - 스레드 상태와 플래그 불일치(데드락)]
+무슨 일이었나: 검사는 백그라운드 스레드(QThread)에서 돌아감. "지금 검사 중인가?"를 나타내는 _worker_busy와, 스레드가 "완전히 끝났는가"를 나타내는 isRunning()을 둘 다 보고 있었는데, 타이밍이 어긋나서 "검사는 끝났다고 생각하는데 아직 스레드 정리 중"인 순간에 다음 검사를 시작하려다 run_detection()에서 "아직 실행 중"이라 스킵 → 검사가 안 시작되는데 _worker_busy는 True로 남아 버려 영원히 멈춤.
+해결:
+- run_detection() 안의 isRunning() 체크 제거. "검사 끝남"은 QThread의 finished 시그널이 날아올 때만 _worker_busy = False로 하도록 _on_worker_finished()에서만 처리. _on_detection_result()에서는 _worker_busy를 건드리지 않음.
+- Worker의 run() 안에 try-except를 넣어서, 예외가 나도 빈 결과라도 시그널로 보내서 메인 쪽이 멈추지 않게 함.
+
+[원인 2 - contour 좌표 자료형 (가장 핵심)]
+무슨 일이었나: ROI로 잘라서 검사한 뒤, 검출된 contour(윤곽) 좌표를 "전체 이미지 기준"으로 옮기려고 오프셋(rx, ry)을 더했음. 그런데 (정수 배열 + 실수 오프셋) 계산 결과가 float64가 됨. OpenCV의 drawContours, boundingRect, minAreaRect 등은 보통 정수(int32) 좌표를 기대하는데 float64가 들어가면 에러가 나고, 그 에러가 except로 잡히면서 render_main_view()가 호출되지 않아 화면이 갱신되지 않아 "멈춘 것처럼" 보임.
+해결:
+- 오프셋을 더한 뒤 반드시 정수로 바꿔서 넘김: .astype(np.int32). 예: contours = [(cnt + offset).astype(np.int32) for cnt in contours]
+
+[원인 3 - 에러 나도 화면은 갱신]
+무슨 일이었나: 위처럼 에러가 나면 except 블록에서 로그만 찍고 끝나서, current_display_frame이 안 바뀌고 render_main_view()도 안 불림 → 화면이 멈춘 것처럼 보임.
+해결:
+- except 블록에서도 full_frame 또는 raw_frame으로 current_display_frame을 세팅하고 render_main_view()를 한 번 호출해서, 에러가 나도 최소한 마지막 프레임은 보이게 함.
+
+-------------------------------------------
+[성능 최적화 - Classification 검사 속도]
+"딥러닝 분류가 느려서 빠르게"
+-------------------------------------------
+상황: Defect를 Bubble/Particle 등으로 분류할 때 딥러닝 모델을 쓰면, 검출된 개수만큼 한 번씩 추론해서 너무 느림.
+한 일:
+- contour 하나씩 classify() 부르는 대신, 한 프레임의 모든 contour에 대한 이미지(ROI)를 한꺼번에 tensor로 묶어서 모델에 한 번만 넣는 classify_batch() 추가. GPU를 쓸 때 특히 효과가 큼.
+- 모델 로드 시 GPU가 있으면(torch.cuda.is_available()) device를 cuda로 설정.
+- 메인 창 검사 흐름에서 contour 루프 제거하고 classify_batch() 한 번 호출한 뒤, 돌아온 결과 리스트로 그리기·저장·Result 목록 갱신. 결과 목록에서 선택 바뀌어서 다시 그릴 때도 classify_batch() 사용.
+
+-------------------------------------------
+[기능 개선 - 이미지 로드 시 1회 검사]
+"bmp/jpg 한 장만 넣었을 때는 검사 한 번만 하고 멈추게"
+-------------------------------------------
+상황: 동영상이 아니라 bmp, jpg 같은 단일 이미지를 불러왔을 때는 Start Inspection을 눌렀을 때 한 번만 검사하고 자동으로 멈추었으면 함 (계속 같은 장만 반복 검사하지 않게).
+한 일:
+- 검사 결과를 받는 _on_detection_result()에서, "지금 소스가 FileCamera이고 동영상이 아니다(is_video() == False)"이면: 타이머 정지, is_inspecting=False, 버튼을 다시 "Start Inspection"으로 되돌림. 동영상(avi 등)은 예전처럼 연속 검사 유지.
+
+-------------------------------------------
+[기능 개선 - pth 경로 및 모델 드래그앤드롭]
+"학습 모델(pth) 경로를 프로젝트 기준으로 + pth 파일 끌어다 놓으면 로드"
+-------------------------------------------
+상황: 학습된 모델(.pth) 저장 경로가 다른 PC 절대 경로로 잡혀 있어서 불편. 그리고 pth 파일을 창에 끌어다 놓기만 해도 그 모델이 로드되면 좋겠음.
+한 일:
+- 프로젝트 루트 경로를 _project_root()로 계산 (src/ui 기준 상위 두 단계). 모델 기본 경로를 그 루트의 classification_model.pth, 학습 데이터 기본 폴더를 ClassificationData로 설정.
+- 드래그앤드롭 처리에서 "파일이 하나이고 확장자가 .pth"이면 classifier.load_dl_model(경로) 호출 후 성공/실패 메시지 표시. Main/Classification 탭 구분 없이 창 어디에나 놓아도 동작.
+
+-------------------------------------------
+[기능 추가 - Basler 카메라 연동 강화]
+"Basler(acA1920-25gm) 연결·해제·실시간/1회 촬영·설정 창"
+-------------------------------------------
+상황: Basler GigE 카메라(acA1920-25gm)를 랜으로 연결해서 쓰려고 함. 연결/해제를 버튼으로 하고, 연결되면 검사는 카메라에서 받은 화면으로 하고, "계속 받을지 / 한 장만 받을지" 선택하고, 노출·게인 같은 설정을 창에서 조절·저장·불러오기 하고 싶음.
+한 일:
+- basler_camera.py: acA1920-25gm이 있으면 그걸 우선 선택(_find_basler_device). open() 시 1프레임 Grab으로 연결 확인. is_connected(), get_parameters_dict / set_parameters_dict(노출·게인 등) 추가. close() 시 camera=None으로 정리.
+- Connect 버튼: 이미 연결돼 있으면 "해제"(타이머 정지, close, 버튼 문구 "Connect Basler Camera"). 아니면 연결 시도 후 성공 시 "Disconnect Basler Camera"로 바꾸고 Basler 설정 버튼 활성화.
+- RealTime View 체크: 켜면 타이머로 33ms마다 연속 grab. 끄면 타이머는 멈추고, Start Inspection을 누를 때만 한 번 update_frame() 호출해서 1장만 Grab 후 검사. Basler+단일 Grab 모드면 결과 한 번 나온 뒤 자동으로 검사 중지(버튼 복귀).
+- Basler 설정 다이얼로그(basler_settings_dialog.py): ExposureAuto/ExposureTime, GainAuto/Gain 입력란. "현재 세팅 로드"는 카메라에서 읽어서 화면에 채움. "적용"은 화면 값을 카메라에 씀. "파일에 저장"/"파일에서 로드"는 JSON(기본 basler_settings.json)으로 저장·불러오기.
+
+-------------------------------------------
+[개선 - Basler 연결 실패 시 원인 표시]
+"Camera Error 말고, 왜 안 됐는지 메시지로 보여 주기"
+-------------------------------------------
+상황: Basler 연결이 안 될 때 상태창에 "Camera Error"만 나와서 원인을 모름.
+한 일:
+- open() 실패 시 원인 문자열을 _last_error에 저장하고, get_last_error()로 조회 가능하게 함.
+- pypylon이 없으면 "pypylon이 설치되어 있지 않습니다" + pip install 안내. 디바이스가 없으면 "Basler 카메라를 찾을 수 없습니다" + GigE IP/서브넷, Pylon IP Configurator, Pylon SDK 설치 안내. 그 외는 예외 메시지(str(e)) 저장.
+- 연결 실패 시 QMessageBox로 위 메시지 + "pip install pypylon, Pylon SDK 설치, GigE 설정 확인" 안내를 띄워서 사용자가 다음에 무엇을 해야 할지 알 수 있게 함.
+
+-------------------------------------------
+[환경 - Basler Pylon 설치]
+"Pylon 26.01 설치해도 소스는 안 건드림"
+-------------------------------------------
+참고: Basler pylon 26.01.exe를 설치하면 보통 C:\Program Files\Basler\pylon 6\ 같은 경로에 들어감. 우리 코드에는 그 경로를 적어 두지 않음. pypylon이 설치된 Pylon 런타임을 자동으로 찾음. Pylon 설치 후에는 앱을 한 번 끄고 다시 켜거나, pip install --force-reinstall pypylon 후 다시 실행해 보면 됨.
+
+-------------------------------------------
+[기능 추가 - exe 빌드 (PyInstaller)]
+"프로그램을 exe로 만들어서 Python 없이도 실행"
+-------------------------------------------
+상황: VS Code 없이, Python이 없는 다른 PC에서도 프로그램을 실행하고 싶음.
+한 일:
+- build_exe.py 추가: PyInstaller로 exe를 빌드하는 스크립트. 실행하면 dist\ForeignBodyInsp\ForeignBodyInsp.exe가 생성됨.
+- exe가 있는 폴더에 classification_model.pth를 두면 자동으로 딥러닝 모델 로드. Use Classification 자동 체크.
+- exe 실행 시 작업 디렉터리를 exe 폴더로 고정(os.chdir). _project_root()도 exe 폴더 기준.
+- torch DLL 검색 경로 문제 해결: src/main.py 맨 앞에서 _internal\torch\lib를 os.add_dll_directory + PATH에 등록 (BugReport 참고).
+- exe 빌드는 CPU 전용 환경(.venv_cpu)에서 하는 것을 권장. GPU torch로 빌드하면 CUDA DLL 문제가 생길 수 있음.
+
+-------------------------------------------
+[기능 추가 - run.bat]
+"Python만 있으면 더블클릭으로 실행"
+-------------------------------------------
+상황: VS Code 없이 프로그램을 간단히 실행하고 싶음. exe 빌드까지는 안 하고.
+한 일:
+- 프로젝트 루트에 run.bat 추가. 더블클릭하면 .venv가 있으면 그 Python으로, 없으면 시스템 python으로 src\main.py 실행.
+
+-------------------------------------------
+[개선 - Ctrl+Shift+R 재시작 방식 변경]
+"F5(디버거)로 실행해도 재시작 시 새 창이 뜨게"
+-------------------------------------------
+상황: F5로 실행한 상태에서 Ctrl+Shift+R을 누르면 새 창이 안 뜨고 그냥 꺼짐.
+한 일:
+- os.execv() 대신 subprocess.Popen()으로 새 프로세스를 띄운 뒤, QApplication.quit()로 현재 앱 종료.
+  Windows에서는 DETACHED_PROCESS로 디버거와 분리된 독립 프로세스 실행.
+  (상세 원인은 BugReport 참고)
+
+-------------------------------------------
+[개선 - 모델 로드 실패 시 상세 에러 표시]
+"왜 안 됐는지 메시지로 보여 주기"
+-------------------------------------------
+상황: exe에서 모델 로드 실패 시 "실패했습니다"만 나오고 원인을 모름.
+한 일:
+- load_model() 반환값을 (bool, str|None) 튜플로 변경. 실패 시 에러 메시지 문자열 전달.
+- UI의 QMessageBox에 실제 에러 내용 표시. 파일 존재 여부도 먼저 체크.
+  (상세 원인은 BugReport 참고)
 
 ===========================================
-주요 기능 요약
+추가 날짜: 2026-02-05 (목) - 설정 저장 / 파라미터 / UI 개선
 ===========================================
 
-[이미지 입력]
-- Basler 카메라 연결
-- 파일 로드 (다이얼로그)
-- Drag & Drop 이미지 로드
+-------------------------------------------
+[설정 저장 - path_config.json]
+"ClassificationData 폴더 경로 영구 저장"
+-------------------------------------------
+상황: Classification 탭에서 데이터 폴더를 지정해도 프로그램 재시작 시 사라짐. QSettings는 Windows 레지스트리에 저장되어 PC 이동이 불편함.
+한 일:
+- exe/프로젝트 루트에 path_config.json 파일 생성. ClassificationData 폴더 경로를 여기에 저장.
+- 프로그램 시작 시 path_config.json → QSettings → 기본값 순서로 읽어서 적용.
+- 다른 PC로 옮길 때 path_config.json만 함께 가져가면 됨.
 
-[검사 기능]
-- Start/Stop Inspection
-- Threshold 조정 (0~255)
-- Min Area 조정 (0~500)
-- Adaptive Threshold 옵션
+-------------------------------------------
+[기능 추가 - RuleBase 파라미터 다이얼로그]
+"검사 조건을 UI에서 설정하고 JSON 저장/로드"
+-------------------------------------------
+상황: RuleBase 검사의 Noise_Dust 면적, Bubble 원형도, Fiber 종횡비 같은 파라미터를 코드 수정 없이 바꾸고 싶음.
+한 일:
+- rule_params_dialog.py 생성: 설정 → RuleBase 파라미터... 메뉴로 접근.
+- 각 파라미터를 QSpinBox/QDoubleSpinBox로 편집. 저장(JSON)/불러오기 버튼.
+- rule_params.json으로 저장되며, 프로그램 시작 시 자동 로드.
 
-[결과 표시]
-- Result 리스트: 검출된 Defect 목록 (분류, 면적)
-- ImageView: 전체 이미지 + 빨간색 contour + 노란색 선택 하이라이트
-- DefectView: 선택한 Defect의 확대 이미지 (원본 해상도, 최소 150x150)
+-------------------------------------------
+[개선 - Bubble 라벨 통합]
+"Small/Big/BackGround Bubble → Bubble 하나로"
+-------------------------------------------
+상황: Bubble이 3종류(Small, Big, BackGround)로 나뉘어 있어 불필요하게 복잡함.
+한 일:
+- BUBBLE_LABEL = "Bubble" 단일 상수로 통일. LEGACY_BUBBLE_LABELS/FOLDERS는 하위 호환용으로만 유지.
+- 분류, 저장, 학습, 표시 모두 "Bubble" 하나로 처리.
 
-[뷰어 조작]
-- Ctrl+마우스휠: 확대/축소 (0.2x ~ 6.0x)
-- 좌클릭+드래그: 패닝 (이미지 이동)
-- Defect 클릭: 해당 Defect 선택 및 상세 보기
+-------------------------------------------
+[버그 수정 - 동영상 슬라이더 역방향 이동]
+"진행바를 뒤로 끌면 원위치로 돌아가는 문제"
+-------------------------------------------
+상황: 동영상 재생 중 슬라이더를 뒤로 드래그하면 즉시 원래 위치로 복귀됨.
+한 일:
+- _video_slider_just_sought 플래그 추가. 사용자가 시크한 직후 1프레임은 update_frame에서 슬라이더 동기화를 스킵.
 
-[성능 최적화]
-- 원본 해상도 유지로 선명도 보장
-- ROI 크롭 방식으로 빠른 렌더링
-- 비연속 배열 처리로 안정성 확보
+-------------------------------------------
+[기능 추가 - 어노테이션 표시 토글]
+"Classification 탭에서 기존 어노테이션 표시/숨기기"
+-------------------------------------------
+상황: 불량 이미지 로드 시 기존 어노테이션이 표시되면 좋겠고, on/off도 하고 싶음.
+한 일:
+- AnnotationCanvas에 _show_annotations 속성 추가. set_show_annotations() 메서드.
+- "어노테이션 표기" 체크박스로 토글. 이미지 로드 시 annotations.json에서 해당 이미지의 어노테이션 자동 복원.
+
+-------------------------------------------
+[버그 수정 - 어노테이션 저장 시 BMP 생성]
+"JSON만 저장해야 하는데 BMP도 같이 만들어지는 문제"
+-------------------------------------------
+상황: 어노테이션 저장 시 annotations.json과 함께 불필요한 BMP 파일이 생성됨.
+한 일:
+- _save_annotations에서 DefectImageSaver.save()/save_original() 호출 제거.
+- JSON만 저장하도록 완전히 재작성. 버튼 텍스트도 "어노테이션 저장 (JSON)"으로 변경.
+
+-------------------------------------------
+[개선 - 분류 이미지 크기 확대]
+"학습/추론 이미지를 64→128로 확대"
+-------------------------------------------
+상황: 64x64는 너무 작아서 분류 정확도가 낮음.
+한 일:
+- CLASSIFICATION_INPUT_SIZE = 128 상수 도입.
+- 학습, 추론, ROI 추출, 저장 모두 이 상수를 참조하도록 통일. 나중에 256 등으로 변경 가능.
+
+-------------------------------------------
+[기능 변경 - Main 창 어노테이션 Brush 방식]
+"사각형 ROI → Brush로 Defect 위치를 그리고 128×128 저장"
+-------------------------------------------
+상황: Defect을 정확하게 중앙에 두고 학습 데이터를 만들려면 Brush로 그리는 방식이 나음.
+한 일:
+- Main 창의 어노테이션 ROI를 Rect 드래그 → Brush 그리기로 변경.
+- annotation_brush_mask(H,W uint8)에 마우스로 그림. 기본 두께 1.
+- "Brush 추가" 클릭 시: mask에서 contour 추출 → 각 영역 중심으로 128×128 크롭 → 라벨 선택 → DefectImageSaver로 저장.
+
+-------------------------------------------
+[기능 추가 - Pause/Resume/Stop 버튼]
+"동영상 일시정지/재개/처음부터"
+-------------------------------------------
+한 일:
+- Pause/Resume(Space), Stop/Play 버튼+아이콘 추가.
+- 탭 전환 시 Main 탭 이탈하면 타이머 정지, 복귀하면 재개.
+
+-------------------------------------------
+[기능 추가 - Results 라벨 필터]
+"Particle/Noise/Bubble만 골라 보기"
+-------------------------------------------
+한 일:
+- Results 그룹에 Particle/Noise/Bubble 체크박스 추가.
+- 체크한 라벨만 리스트에 표시. 전부 해제하면 전부 표시.
+- 필터 변경 시 선택 유지.
+
+===========================================
+추가 날짜: 2026-02-05 (목) - YOLO 통합 및 Bubble 검출 강화
+===========================================
+
+-------------------------------------------
+[아키텍처 전환 - YOLO 통합 검출+분류]
+"2단계(threshold→분류)를 1단계(YOLO)로 전환 가능하게"
+-------------------------------------------
+상황: 기존 파이프라인은 threshold로 검출 → RuleBase/DL로 분류하는 2단계. 
+Bubble처럼 threshold에서 잡히지 않는 것은 분류 단계에 도달할 수 없는 구조적 한계가 있음.
+YOLO(검출+분류 동시)로 전환하여 이 문제를 근본적으로 해결.
+
+한 일 (신규 파일):
+- src/core/yolo_detector.py: ultralytics YOLOv8 래퍼 클래스 (YOLODetector)
+  · load_model(): .pt 모델 로드
+  · detect(): 이미지→[{label, confidence, bbox, contour, area, ...}] 반환
+  · train(): data.yaml 기반 YOLO 학습 (모델 크기 선택 가능: n/s/m/l/x)
+  
+- src/core/yolo_dataset.py: YOLO 데이터셋 관리 (YOLODatasetManager)
+  · 폴더 구조 생성 (images/train, images/val, labels/train, labels/val)
+  · data.yaml 자동 생성 (외부 yaml 라이브러리 의존 없이 직접 작성)
+  · add_frame_with_contours(): contour+label → YOLO txt 변환
+  · auto_label_image(): 기존 threshold+RuleBase로 자동 라벨링
+  · split_train_val(): train/val 자동 분할 (20%)
+  · load/save_image_annotations(): 개별 이미지 어노테이션 읽기/쓰기
+  · 좌표 변환 유틸: contour_to_yolo_bbox, bbox_xyxy_to_yolo, yolo_to_bbox_xyxy
+
+- src/ui/yolo_annotation_tab.py: YOLO 어노테이션+학습 통합 탭
+  · BboxCanvas: 이미지 위에 bbox 드래그로 그리기, 이동, 선택/삭제
+  · 3-panel 레이아웃: 왼쪽(데이터셋/파라미터/학습) | 중앙(캔버스) | 오른쪽(이미지목록/어노테이션)
+  · "현재 이미지 자동 라벨링": 기존 threshold+RuleBase+Bubble 검출로 bbox 자동 생성
+  · "폴더 자동라벨링": 폴더 전체 이미지를 자동 라벨링하여 데이터셋 추가
+  · YOLO 학습 UI: 모델크기/에폭/이미지크기/배치크기 설정, 백그라운드(QThread) 학습
+  · YOLOTrainWorker: 학습 완료 시 best.pt 경로 반환
+
+한 일 (기존 파일 수정):
+- src/ui/main_window.py:
+  · "검사 모드" 콤보박스: "Threshold + 분류" / "YOLO 통합 검출" 전환
+  · YOLO 모드 시 threshold/area 슬라이더 비활성화, Hough/LoG 등이 대신 동작
+  · "YOLO 모델 로드" 버튼 + 상태 라벨
+  · DetectionWorker에 _run_yolo()/_run_threshold() 분기 추가
+  · .pt 파일 드래그&드롭으로 YOLO 모델 로드
+  · 앱 시작 시 best.pt/yolo_model.pt 자동 로드
+  · YOLO 탭 추가 (3번째 탭: "YOLO (어노테이션/학습)")
+  
+- requirements.txt: ultralytics 추가
+
+사용 흐름:
+  1) YOLO 탭 → 데이터셋 폴더 지정 → "데이터셋 생성"
+  2) "이미지 추가" 또는 "폴더 자동라벨링"으로 학습 데이터 생성
+  3) 캔버스에서 bbox 수동 보정/추가/삭제
+  4) "Train/Val 분할" → "학습 시작"
+  5) Main 탭 → "YOLO 모델 로드" → 검사 모드를 "YOLO 통합 검출"로 전환
+  6) Start Inspection → YOLO가 검출+분류를 1-pass로 처리
+
+-------------------------------------------
+[검출 강화 - 고급 Bubble 검출 알고리즘]
+"threshold+area만으로는 Bubble 검출 불가 → 다중 기법 파이프라인"
+-------------------------------------------
+상황: 기존 검출은 threshold→morphology→contour만 사용. Bubble은 반투명하고 
+밝은 배경에서 약한 에지만 있어 threshold로는 놓치는 경우가 많음.
+
+한 일 (src/core/detection.py 완전 재작성):
+- BubbleDetectorParams 클래스: 19개 파라미터, get_params()/set_params() JSON 호환.
+- ForeignBodyDetector.detect_bubbles() 메서드 추가 (5단계 파이프라인):
+  1단계 CLAHE: 대비 강화 전처리 (clipLimit, tileGridSize 조절)
+  2단계 Hough Circle Transform: 원형 패턴 직접 검출 (dp, minDist, param1, param2, min/maxRadius)
+  3단계 LoG (Laplacian of Gaussian): 멀티스케일 Blob 검출 (num_scales, min/max_sigma, threshold)
+  4단계 Canny Edge + 원형도: 에지 기반 고원형도 contour 후보 (edge_circularity_min)
+  5단계 Bright-core 필터: 중심-테두리 밝기 차이 검증 (bright_core_margin)
+  6단계 NMS: 중복 후보 제거 (nms_iou_threshold)
+- detect_static()에 detect_bubbles 플래그 추가: True면 Bubble 검출 결과를 합침.
+- _merge_contours(): 기존 contour와 Bubble contour의 중복 제거 후 합침.
+- 디버그 이미지 저장: 06_bubbles.png, 06_clahe.png, 06_log_response.png, 06_edges.png
+
+한 일 (src/ui/rule_params_dialog.py 재작성):
+- 탭 UI로 변경:
+  · 탭 1 "분류 조건": 기존 Noise/Dust, Bubble 원형도, Fiber 종횡비
+  · 탭 2 "Bubble 검출": Hough, LoG, CLAHE, Bright-core, Edge, NMS 파라미터 전체 (스크롤 가능)
+- JSON 저장/로드 포맷 변경: {"classification": {...}, "bubble_detection": {...}}
+- 구버전 JSON 호환: classification 키가 없으면 전체를 분류 파라미터로 간주.
+
+한 일 (main_window.py):
+- _open_rule_params_dialog()에 bubble_params도 전달.
+- rule_params.json 로드 시 bubble_detection 파라미터도 함께 로드.
+- YOLO annotation tab의 자동 라벨링에 "Bubble 검출 포함" 체크박스 추가.
+
+===========================================
+주요 기능 요약 (한눈에 보기)
+===========================================
+
+[입력]
+- Basler: Connect/Disconnect, RealTime View(연속 grab / 1회 grab), Basler 설정 다이얼로그(노출·게인, JSON 저장/로드)
+- 파일: 이미지·동영상 로드(다이얼로그 + 드래그앤드롭), .pth/.pt 모델 드래그앤드롭 로드
+
+[검사 모드]
+- Threshold + 분류: 기존 방식 (threshold→morphology→contour → RuleBase/DL 분류)
+- YOLO 통합 검출: YOLOv8 모델로 검출+분류 1-pass (콤보박스로 전환)
+- Bubble 검출: Hough Circle + LoG Blob + Edge + Bright-core 다중 기법 (파라미터 19개 설정 가능)
+
+[학습]
+- Classification 탭: Brush 어노테이션 → 128×128 ROI 추출 → CNN 학습 (.pth)
+- YOLO 탭: Bbox 어노테이션 + 자동 라벨링 → YOLO 학습 (.pt)
+
+[결과]
+- Result 리스트(필터: Particle/Noise/Bubble), ImageView(전체+선택 강조), Defect View(선택 확대)
+
+[조작]
+- Ctrl+휠 줌, 드래그 패닝, 1:1 줌 토글, Space 일시정지, Tab 탭 전환, R 어노테이션
+
+[설정 파일]
+- path_config.json: 데이터 폴더 경로
+- rule_params.json: 분류 조건 + Bubble 검출 파라미터
+- basler_settings.json: Basler 카메라 설정
 
 ===========================================
 End of History
