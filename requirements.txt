@@ -6,3 +6,5 @@ scikit-image
 torch
 torchvision
 ultralytics
+onnxruntime-gpu
+pyinstaller
