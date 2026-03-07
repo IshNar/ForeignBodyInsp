@@ -1,6 +1,7 @@
 import os
 import cv2
 import numpy as np
+import concurrent.futures
 
 
 class BubbleDetectorParams:
@@ -94,40 +95,54 @@ class ForeignBodyDetector:
 
         _save("01_gray.png", gray)
 
-        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
-        _save("02_blurred.png", blurred)
+        # ─── 1. 멀티스레드 병렬 처리를 위한 함수 분리 ───
+        def run_regular():
+            blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+            _save("02_blurred.png", blurred)
 
-        if use_adaptive:
-            adaptive_binary = cv2.adaptiveThreshold(
-                blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                cv2.THRESH_BINARY_INV, 15, 3
-            )
-            global_dark = (blurred < threshold).astype(np.uint8) * 255
-            thresh = cv2.bitwise_and(adaptive_binary, global_dark)
-        else:
-            _, thresh = cv2.threshold(blurred, threshold, 255, cv2.THRESH_BINARY_INV)
+            if use_adaptive:
+                adaptive_binary = cv2.adaptiveThreshold(
+                    blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                    cv2.THRESH_BINARY_INV, 15, 3
+                )
+                global_dark = (blurred < threshold).astype(np.uint8) * 255
+                thresh = cv2.bitwise_and(adaptive_binary, global_dark)
+            else:
+                _, thresh = cv2.threshold(blurred, threshold, 255, cv2.THRESH_BINARY_INV)
 
-        _save("03_threshold.png", thresh)
+            _save("03_threshold.png", thresh)
 
-        ok_size = max(1, open_kernel)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ok_size, ok_size))
-        opened = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
-        _save("04_opened.png", opened)
-        ck_size = max(1, close_kernel)
-        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ck_size, ck_size))
-        closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel_close, iterations=1)
-        _save("05_closed.png", closed)
+            ok_size = max(1, open_kernel)
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ok_size, ok_size))
+            opened = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
+            _save("04_opened.png", opened)
+            
+            ck_size = max(1, close_kernel)
+            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ck_size, ck_size))
+            closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel_close, iterations=1)
+            _save("05_closed.png", closed)
 
-        contours, hierarchy = cv2.findContours(closed, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-        valid_contours = [cnt for cnt in contours if cv2.contourArea(cnt) >= min_area]
+            cnts, _ = cv2.findContours(closed, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            v_cnts = [cnt for cnt in cnts if cv2.contourArea(cnt) >= min_area]
+            return v_cnts, closed, blurred, thresh, opened
 
-        # Bubble 검출 결과를 합침
-        bubble_contours = []
-        bubble_debug = None
-        if detect_bubbles and self.bubble_params.enabled:
-            bubble_contours, bubble_debug = self.detect_bubbles(gray, debug_dir=debug_dir)
-            if bubble_contours:
-                valid_contours = self._merge_contours(valid_contours, bubble_contours)
+        def run_bubble():
+            if detect_bubbles and self.bubble_params.enabled:
+                return self.detect_bubbles(gray, debug_dir=debug_dir)
+            return [], None
+
+        # ─── 2. ThreadPoolExecutor를 통한 병렬 검사(일반+버블) 동시 실행 ───
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            future_reg = executor.submit(run_regular)
+            future_bub = executor.submit(run_bubble)
+
+            # 두 검사가 모두 끝날 때까지 대기
+            valid_contours, closed, blurred, thresh, opened = future_reg.result()
+            bubble_contours, bubble_debug = future_bub.result()
+
+        # ─── 3. 검사 결과 병합 및 디버깅 데이터 최종 저장 ───
+        if bubble_contours:
+            valid_contours = self._merge_contours(valid_contours, bubble_contours)
 
         self.last_debug = {
             "gray": gray,
@@ -201,11 +216,22 @@ class ForeignBodyDetector:
         else:
             den = flat
 
-        # ──── 4. DoG 밴드패스 (abs) ────
+        # ──── 4. DoG 밴드패스 (abs) 멀티스레드 병렬 실행 ────
         den_f = den.astype(np.float32) / 255.0
         s1, s2 = float(p.sigma_small), float(p.sigma_large)
-        g1 = cv2.GaussianBlur(den_f, (0, 0), s1)
-        g2 = cv2.GaussianBlur(den_f, (0, 0), s2)
+        
+        def _calc_g1():
+            return cv2.GaussianBlur(den_f, (0, 0), s1)
+            
+        def _calc_g2():
+            return cv2.GaussianBlur(den_f, (0, 0), s2)
+            
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            fut_g1 = executor.submit(_calc_g1)
+            fut_g2 = executor.submit(_calc_g2)
+            g1 = fut_g1.result()
+            g2 = fut_g2.result()
+            
         dog_abs = np.abs(g1 - g2)
 
         diff_vis = np.clip(dog_abs * 255.0 * 10.0, 0, 255).astype(np.uint8)
@@ -281,7 +307,7 @@ class ForeignBodyDetector:
         # ──── 8. 시각화 ────
         bub_vis = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
         for cnt in bubble_contours:
-            cv2.drawContours(bub_vis, [cnt], -1, (0, 255, 255), 1)
+            cv2.drawContours(bub_vis, [cnt], -1, (0, 255, 0), 1)
         debug_imgs["bubble_candidates"] = bub_vis
 
         if debug_dir is not None:

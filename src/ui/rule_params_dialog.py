@@ -247,7 +247,7 @@ class DebugDetectionWorker(QThread):
                     should_draw = True
                     
                 if should_draw:
-                    color = {"Noise_Dust": (180, 180, 180), "Bubble": (0, 255, 255),
+                    color = {"Noise_Dust": (180, 180, 180), "Bubble": (0, 255, 0),
                              "Fiber": (255, 100, 0), "Particle": (0, 0, 255)}.get(label, (0, 255, 0))
                     cv2.drawContours(result_vis, [cnt], -1, color, 1)
                     if p.get("show_text", True):
@@ -258,11 +258,11 @@ class DebugDetectionWorker(QThread):
             # Draw Bubbles only if we are viewing ALL or there isn't a strict noise/particle filter that hides them
             if view_filter == "ALL":
                 for cnt in bubble_contours:
-                    cv2.drawContours(result_vis, [cnt], -1, (0, 255, 255), 1)
+                    cv2.drawContours(result_vis, [cnt], -1, (0, 255, 0), 1)
                     if p.get("bubble_show_text", True):
                         x, y, w, h = cv2.boundingRect(cnt)
                         cv2.putText(result_vis, "Bubble", (x, max(y - 4, 10)),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 255), 1)
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 0), 1)
 
             debug_images["result"] = result_vis
 

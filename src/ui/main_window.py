@@ -175,7 +175,7 @@ class DetectionWorker(QThread):
             display_frame = frame.copy()
             # 라벨별 contour 그룹화 → 한 번에 그리기
             COLOR_MAP = {
-                "Bubble": (0, 255, 255),
+                "Bubble": (0, 255, 0),
                 "Particle": (0, 0, 255),
                 "Noise_Dust": (255, 0, 0),
             }
@@ -381,24 +381,45 @@ class MainWindow(QMainWindow):
         _cell_sz = 260
         debug_group = QGroupBox("Debug Image")
         debug_group.setStyleSheet("QGroupBox { font-weight: bold; }")
-        debug_layout = QGridLayout(debug_group)
-        debug_layout.setContentsMargins(12, 18, 12, 12)
-        debug_layout.setSpacing(12)
-        for key, title, row, col in [("gray", "gray", 0, 0), ("blurred", "blurred", 0, 1), ("threshold", "threshold", 1, 0)]:
+        
+        self.debug_tabs = QTabWidget()
+        debug_group_layout = QVBoxLayout(debug_group)
+        debug_group_layout.setContentsMargins(4, 12, 4, 4)
+        debug_group_layout.addWidget(self.debug_tabs)
+        
+        # 1. 일반 검출 탭
+        normal_tab = QWidget()
+        normal_layout = QGridLayout(normal_tab)
+        normal_layout.setContentsMargins(12, 12, 12, 12)
+        normal_layout.setSpacing(12)
+        for key, title, row, col in [("gray", "gray", 0, 0), ("blurred", "blurred", 0, 1), 
+                                     ("threshold", "threshold", 1, 0), ("closed", "Morphology", 1, 1)]:
             lbl = QLabel(title)
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl.setStyleSheet("background-color: #222; color: #888; font-size: 10px;")
             lbl.setFixedSize(_cell_sz, _cell_sz)
             lbl.setMinimumSize(_cell_sz, _cell_sz)
             self.debug_labels[key] = lbl
-            debug_layout.addWidget(lbl, row, col)
-        lbl_morph = QLabel("Morphology")
-        lbl_morph.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_morph.setStyleSheet("background-color: #222; color: #888; font-size: 10px;")
-        lbl_morph.setFixedSize(_cell_sz, _cell_sz)
-        lbl_morph.setMinimumSize(_cell_sz, _cell_sz)
-        self.debug_labels["closed"] = lbl_morph
-        debug_layout.addWidget(lbl_morph, 1, 1)
+            normal_layout.addWidget(lbl, row, col)
+        
+        self.debug_tabs.addTab(normal_tab, "일반 검출")
+        
+        # 2. 버블 검출 탭
+        bubble_tab = QWidget()
+        bubble_layout = QGridLayout(bubble_tab)
+        bubble_layout.setContentsMargins(12, 12, 12, 12)
+        bubble_layout.setSpacing(12)
+        for key, title, row, col in [("clahe", "CLAHE / Flat", 0, 0), ("diff_map", "DoG Diff", 0, 1), 
+                                     ("binary", "MAD Binary", 1, 0), ("bubble_candidates", "Bubble Result", 1, 1)]:
+            lbl = QLabel(title)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet("background-color: #222; color: #888; font-size: 10px;")
+            lbl.setFixedSize(_cell_sz, _cell_sz)
+            lbl.setMinimumSize(_cell_sz, _cell_sz)
+            self.debug_labels[key] = lbl
+            bubble_layout.addWidget(lbl, row, col)
+            
+        self.debug_tabs.addTab(bubble_tab, "버블 검출")
         debug_panel_layout.addWidget(debug_group)
 
         defect_group = QGroupBox("Defect View")
@@ -1276,7 +1297,7 @@ class MainWindow(QMainWindow):
                     elif label == "Noise_Dust":
                         color = (255, 0, 0)  # Blue
                     elif label == "Bubble":
-                        color = (0, 255, 255)  # Yellow
+                        color = (0, 255, 0)  # Green
                     else:
                         color = (0, 255, 0)  # Green fallback
                     text_color = color
@@ -1534,7 +1555,7 @@ class MainWindow(QMainWindow):
                     elif label == "Noise_Dust":
                         color = (255, 0, 0)  # Blue
                     elif label == "Bubble":
-                        color = (0, 255, 255)  # Yellow
+                        color = (0, 255, 0)  # Green
                     else:
                         color = (0, 255, 0)  # Green fallback
                     text_color = color
@@ -1954,21 +1975,48 @@ class MainWindow(QMainWindow):
     def update_debug_panel(self):
         """Update debug images. Static Box 260 유지, 이미지만 230으로 표시."""
         d = getattr(self.detector, "last_debug", None)
+        bubble_d = d.get("bubble_debug", {}) if d else {}
+        
         inner_sz = 230
-        for key in ("gray", "blurred", "threshold", "closed"):
-            lbl = self.debug_labels[key]
-            if d is None or key not in d:
-                lbl.setPixmap(QPixmap())
-                lbl.setText("Morphology" if key == "closed" else key)
+        
+        map_keys = [
+            ("gray", d), ("blurred", d), ("threshold", d), ("closed", d),
+            ("clahe", bubble_d), ("diff_map", bubble_d), ("binary", bubble_d), ("bubble_candidates", bubble_d)
+        ]
+        
+        titles = {
+            "gray": "Gray", "blurred": "Blurred", "threshold": "Threshold", "closed": "Morphology",
+            "clahe": "CLAHE / Flat", "diff_map": "DoG Diff", "binary": "MAD Binary", "bubble_candidates": "Bubble Result"
+        }
+        
+        for key, source_dict in map_keys:
+            if key not in self.debug_labels:
                 continue
-            img = d[key]
+            lbl = self.debug_labels[key]
+            title = titles.get(key, key)
+            
+            if source_dict is None or key not in source_dict:
+                lbl.setPixmap(QPixmap())
+                lbl.setText(title)
+                continue
+                
+            img = source_dict[key]
             if img is None or img.size == 0:
                 lbl.setPixmap(QPixmap())
-                lbl.setText("Morphology" if key == "closed" else key)
+                lbl.setText(title)
                 continue
+                
             try:
                 resized = cv2.resize(img, (inner_sz, inner_sz), interpolation=cv2.INTER_AREA)
-                if len(resized.shape) == 2:
+                
+                # --- 디버그 이미지 좌측 상단에 이름 표기 ---
+                is_gray = (len(resized.shape) == 2)
+                color_bg = 0 if is_gray else (0, 0, 0)
+                color_fg = 255 if is_gray else (255, 255, 255)
+                cv2.rectangle(resized, (0, 0), (100, 24), color_bg, -1)
+                cv2.putText(resized, title, (5, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_fg, 1)
+                
+                if is_gray:
                     resized = np.ascontiguousarray(resized)
                     h, w = resized.shape
                     bytes_per_line = w
