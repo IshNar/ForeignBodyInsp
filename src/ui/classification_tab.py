@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QGroupBox, QComboBox, QLineEdit, QProgressBar,
     QSplitter, QMessageBox, QSpinBox, QListWidgetItem,
 )
-from PyQt6.QtCore import Qt, QSize, QThread, pyqtSignal, QSettings
+from PyQt6.QtCore import Qt, QSize, QThread, pyqtSignal, QSettings, QEvent
 from PyQt6.QtGui import QImage, QPixmap, QShortcut, QKeySequence
 
 from src.core.classification import (
@@ -147,12 +147,13 @@ class ClassificationTab(QWidget):
         self.lbl_preview.setStyleSheet("background-color: #222; color: #888; font-size: 14px;")
         self.lbl_preview.setMinimumSize(400, 400)
         self.lbl_preview.setScaledContents(False)
-        left_layout.addWidget(self.lbl_preview)
+        left_layout.addWidget(self.lbl_preview, 1)  # 이미지 영역 최대화
 
-        # 미리보기 하단: 파일 정보
+        # 미리보기 하단: 파일 정보 (컴팩트)
         self.lbl_file_info = QLabel("")
-        self.lbl_file_info.setStyleSheet("color: gray; font-size: 11px;")
-        left_layout.addWidget(self.lbl_file_info)
+        self.lbl_file_info.setStyleSheet("color: gray; font-size: 27px; padding: 8px;")
+        self.lbl_file_info.setFixedHeight(90)
+        left_layout.addWidget(self.lbl_file_info, 0)  # 고정 크기
 
         # === 오른쪽: 이미지 목록 + 라벨 + 저장 + 학습 ===
         right_panel = QWidget()
