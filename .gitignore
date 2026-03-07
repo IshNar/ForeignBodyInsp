@@ -6,3 +6,20 @@ __pycache__/
 !Ext-5_#1.jpg
 !image.png
 !광학계 사양.jpg
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# Build and Distribution
+dist/
+build/
+*.spec
+
+# VS Code settings
+.vscode/
+
+# Logs and temporary files
+*.log
+.DS_Store
