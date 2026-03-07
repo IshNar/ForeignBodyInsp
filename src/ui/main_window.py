@@ -29,7 +29,7 @@ from src.ui.rule_params_dialog import RuleParamsDialog
 
 class DetectionWorker(QThread):
     """Runs detection and optional MainView drawing in a background thread."""
-    result_ready = pyqtSignal(list, object, object, object, object, object)  # contours, display_frame, display_base_frame, last_debug, raw_frame, full_frame
+    result_ready = pyqtSignal(list, object, object, object, object, object, dict)  # contours, display_frame, display_base_frame, last_debug, raw_frame, full_frame, tact_times
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -67,7 +67,7 @@ class DetectionWorker(QThread):
     def run(self):
         try:
             if self._frame_bgr is None:
-                self.result_ready.emit([], None, None, None, None, self._full_frame_bgr)
+                self.result_ready.emit([], None, None, None, None, self._full_frame_bgr, {})
                 return
             frame = self._frame_bgr
 
@@ -79,7 +79,7 @@ class DetectionWorker(QThread):
             print(f"DetectionWorker error: {e}")
             import traceback
             traceback.print_exc()
-            self.result_ready.emit([], None, None, None, None, self._full_frame_bgr)
+            self.result_ready.emit([], None, None, None, None, self._full_frame_bgr, {})
 
     def _run_threshold(self, frame):
         """기존 Threshold+분류 파이프라인 (최적화 + 프로파일링)."""
@@ -194,20 +194,19 @@ class DetectionWorker(QThread):
         raw_frame = frame
 
         t_draw = time.perf_counter()
-
-        # ──── 프로파일링 출력 ────
         total = t_draw - t_start
-        print(f"[Pipeline Profile] "
-              f"prep={t_prep-t_start:.3f}s | "
-              f"detect={t_detect-t_prep:.3f}s | "
-              f"bubble={t_bubble-t_detect:.3f}s | "
-              f"merge={t_merge-t_bubble:.3f}s | "
-              f"classify={t_classify-t_merge:.3f}s | "
-              f"draw={t_draw-t_classify:.3f}s | "
-              f"TOTAL={total:.3f}s | "
-              f"contours={len(final_contours)}")
 
-        self.result_ready.emit(final_contours, display_frame, display_base_frame, last_debug, raw_frame, self._full_frame_bgr)
+        tact_times = {
+            "prep": t_prep - t_start,
+            "detect": t_detect - t_prep,
+            "bubble": t_bubble - t_detect,
+            "merge": t_merge - t_bubble,
+            "classify": t_classify - t_merge,
+            "draw": t_draw - t_classify,
+            "total": total
+        }
+
+        self.result_ready.emit(final_contours, display_frame, display_base_frame, last_debug, raw_frame, self._full_frame_bgr, tact_times)
 
     def _run_yolo(self, frame):
         """YOLO 통합 검출+분류 파이프라인."""
@@ -239,7 +238,7 @@ class DetectionWorker(QThread):
             display_base_frame = frame.copy()
 
         raw_frame = frame.copy()
-        self.result_ready.emit(contours, display_frame, display_base_frame, last_debug, raw_frame, self._full_frame_bgr)
+        self.result_ready.emit(contours, display_frame, display_base_frame, last_debug, raw_frame, self._full_frame_bgr, {"total": 0, "yolo": 0})
 
 
 class MainWindow(QMainWindow):
@@ -446,10 +445,15 @@ class MainWindow(QMainWindow):
         self.lbl_defect_counts = QLabel("")
         self.lbl_defect_counts.setStyleSheet("padding: 4px; font-family: monospace; color: #ff9900;")
         self.lbl_defect_counts.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        self.lbl_tact_info = QLabel("Tact: -")
+        self.lbl_tact_info.setStyleSheet("padding: 4px; font-family: monospace; color: #00ff00; margin-left: 10px;")
+        self.lbl_tact_info.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         
         info_layout.addWidget(self.lbl_mouse_info)
         info_layout.addStretch()
         info_layout.addWidget(self.lbl_defect_counts)
+        info_layout.addWidget(self.lbl_tact_info)
 
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
@@ -1220,7 +1224,7 @@ class MainWindow(QMainWindow):
         """QThread가 완전히 종료된 후 호출. _worker_busy 해제."""
         self._worker_busy = False
 
-    def _on_detection_result(self, contours, display_frame, display_base_frame, last_debug, raw_frame, full_frame):
+    def _on_detection_result(self, contours, display_frame, display_base_frame, last_debug, raw_frame, full_frame, tact_times):
         """Called in main thread when DetectionWorker finishes."""
         try:
             # _worker_busy는 finished signal에서 해제 (QThread 종료 보장)
@@ -1372,6 +1376,27 @@ class MainWindow(QMainWindow):
                 self.list_results.clearSelection()
                 self.clear_defect_view()
             self.update_defect_view()
+            
+            # --- Tact Time 업데이트 ---
+            if tact_times:
+                if self.use_yolo_mode:
+                     tact_str = f"Tact: {tact_times.get('total', 0)*1000:.0f}ms (YOLO)"
+                elif self._maker_mode:
+                    p_t = tact_times.get('prep', 0) * 1000
+                    d_t = tact_times.get('detect', 0) * 1000
+                    b_t = tact_times.get('bubble', 0) * 1000
+                    m_t = tact_times.get('merge', 0) * 1000
+                    c_t = tact_times.get('classify', 0) * 1000
+                    dr_t = tact_times.get('draw', 0) * 1000
+                    total_t = tact_times.get('total', 0) * 1000
+                    tact_str = f"Tact: {total_t:.0f}ms (Prep:{p_t:.0f}, Rule:{d_t:.0f}, Bub:{b_t:.0f}, Merge:{m_t:.0f}, Class:{c_t:.0f}, Draw:{dr_t:.0f})"
+                else:
+                    total_t = tact_times.get('total', 0) * 1000
+                    tact_str = f"Tact: {total_t:.0f}ms"
+                self.lbl_tact_info.setText(tact_str)
+            else:
+                self.lbl_tact_info.setText("Tact: -")
+
             # 이미지 / Basler 단일 Grab / 동영상 멈춤 상태 1회 검사: 완료 후 버튼을 Start로 복귀
             single_shot = False
             if isinstance(self.camera, FileCamera) and not self.camera.is_video():
