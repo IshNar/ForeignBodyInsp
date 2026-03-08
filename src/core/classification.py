@@ -140,6 +140,19 @@ class DeepLearningClassifier:
     def is_loaded(self) -> bool:
         return self.model is not None or self.ort_session is not None
 
+    def get_device(self) -> str:
+        """추론에 사용 중인 디바이스. 'cuda' 또는 'cpu'."""
+        return getattr(self, "_device", "cpu")
+
+    def get_device_display(self) -> str:
+        """UI 표시용: GPU 사용 여부 및 백엔드."""
+        if not self.is_loaded():
+            return "—"
+        dev = self.get_device()
+        if self.ort_session is not None:
+            return "GPU (ONNX)" if dev == "cuda" else "CPU (ONNX)"
+        return "GPU (PyTorch)" if dev == "cuda" else "CPU (PyTorch)"
+
     def load_model(self, model_path: str):
         """저장된 모델 로드. 반환: (성공 여부, 실패 시 오류 메시지)."""
         try:

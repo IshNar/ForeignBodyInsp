@@ -147,24 +147,30 @@ class DetectionWorker(QThread):
                   and hasattr(classifier, 'dl_classifier')
                   and classifier.dl_classifier.is_loaded())
 
+        n_bubble = len(bubble_contours)
+        n_gen = len(non_overlap_valid)
+
         if use_dl and final_contours:
+            # DL 모드: 전체 contour (bubble+일반) 배치 추론
             final_results = classifier.classify_batch(final_contours, frame)
             from collections import Counter
             label_counts = Counter(r.get("label", "?") for r in final_results)
-            print(f"[DL 분류] contour {len(final_contours)}개 → {dict(label_counts)}")
+            print(f"[DL 분류] 전체 {len(final_contours)}개 (Bub:{n_bubble}+Gen:{n_gen}) → {dict(label_counts)}")
         else:
+            # RuleBase 모드: bubble은 직접 라벨, 일반은 RuleBase 분류
             final_results = []
-            if bubble_contours:
-                bubble_stats = classifier.classify_batch(bubble_contours, frame)
-                for stat in bubble_stats:
-                    stat["label"] = "Bubble"
-                    stat["confidence"] = 1.0
-                    final_results.append(stat)
-                    
-            if classifier and non_overlap_valid:
+            for cnt in bubble_contours:
+                area = cv2.contourArea(cnt)
+                peri = cv2.arcLength(cnt, True)
+                circ = 4.0 * np.pi * area / (peri * peri) if peri > 0 else 0
+                final_results.append({
+                    "label": "Bubble", "confidence": 1.0,
+                    "area": float(area), "circularity": circ, "aspect_ratio": 1.0,
+                })
+            if non_overlap_valid and classifier:
                 gen_results = classifier.classify_batch(non_overlap_valid, frame)
                 final_results.extend(gen_results)
-            
+
         self._rule_detections = final_results
 
         t_classify = time.perf_counter()
@@ -203,7 +209,10 @@ class DetectionWorker(QThread):
             "merge": t_merge - t_bubble,
             "classify": t_classify - t_merge,
             "draw": t_draw - t_classify,
-            "total": total
+            "total": total,
+            "n_contours": len(final_contours),
+            "n_bubble": n_bubble,
+            "n_gen_classify": n_gen,
         }
 
         self.result_ready.emit(final_contours, display_frame, display_base_frame, last_debug, raw_frame, self._full_frame_bgr, tact_times)
@@ -643,6 +652,10 @@ class MainWindow(QMainWindow):
         self.btn_load_model.setFixedWidth(80)
         self.btn_load_model.clicked.connect(self._on_load_model)
         dl_row.addWidget(self.btn_load_model)
+        self.lbl_dl_device = QLabel("—")
+        self.lbl_dl_device.setToolTip("Classification 추론 디바이스 (모델 로드 후 표시)")
+        self.lbl_dl_device.setStyleSheet("color: #666; font-size: 11px;")
+        dl_row.addWidget(self.lbl_dl_device)
         dl_row.addStretch()
         settings_layout.addLayout(dl_row)
 
@@ -1389,7 +1402,10 @@ class MainWindow(QMainWindow):
                     c_t = tact_times.get('classify', 0) * 1000
                     dr_t = tact_times.get('draw', 0) * 1000
                     total_t = tact_times.get('total', 0) * 1000
-                    tact_str = f"Tact: {total_t:.0f}ms (Prep:{p_t:.0f}, Rule:{d_t:.0f}, Bub:{b_t:.0f}, Merge:{m_t:.0f}, Class:{c_t:.0f}, Draw:{dr_t:.0f})"
+                    nc = tact_times.get('n_contours', 0)
+                    nb = tact_times.get('n_bubble', 0)
+                    ng = tact_times.get('n_gen_classify', 0)
+                    tact_str = f"Tact: {total_t:.0f}ms (Rule:{d_t:.0f}, Bub:{b_t:.0f}, Class:{c_t:.0f}[{ng}개]) | 검출:{nc} (Bub:{nb}, Gen:{ng})"
                 else:
                     total_t = tact_times.get('total', 0) * 1000
                     tact_str = f"Tact: {total_t:.0f}ms"
@@ -1474,6 +1490,12 @@ class MainWindow(QMainWindow):
     def _on_use_dl_toggled(self, checked):
         """Use Classification 체크박스 토글."""
         self.classifier.set_use_deep_learning(checked)
+        if hasattr(self, "lbl_dl_device"):
+            disp = self.classifier.dl_classifier.get_device_display()
+            self.lbl_dl_device.setText(disp)
+            self.lbl_dl_device.setStyleSheet(
+                "color: #0a0; font-size: 11px;" if "GPU" in disp else "color: #666; font-size: 11px;"
+            )
         if checked and not self.classifier.dl_classifier.is_loaded():
             QMessageBox.information(self, "알림",
                 "딥러닝 모델이 로드되지 않았습니다.\n"
@@ -1536,11 +1558,19 @@ class MainWindow(QMainWindow):
         ok, err = self.classifier.load_dl_model(fname)
         if ok:
             labels = self.classifier.dl_classifier.labels
+            disp = self.classifier.dl_classifier.get_device_display()
+            if hasattr(self, "lbl_dl_device"):
+                self.lbl_dl_device.setText(disp)
+                self.lbl_dl_device.setStyleSheet(
+                    "color: #0a0; font-size: 11px;" if "GPU" in disp else "color: #666; font-size: 11px;"
+                )
             QMessageBox.information(self, "모델 로드 완료",
-                f"모델이 로드되었습니다.\n클래스: {', '.join(labels)}")
+                f"모델이 로드되었습니다.\n클래스: {', '.join(labels)}\n추론: {disp}")
         else:
             QMessageBox.warning(self, "오류",
                 "모델 로드에 실패했습니다.\n\n" + (err or "알 수 없는 오류"))
+            if hasattr(self, "lbl_dl_device"):
+                self.lbl_dl_device.setText("—")
         return ok
 
     def _on_load_model(self):
