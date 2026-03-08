@@ -629,59 +629,82 @@ class ClassificationTab(QWidget):
             QMessageBox.information(self, "알림", "등록된 이미지가 없습니다.")
             return
 
-        data_dir = _resolve_data_dir(self.txt_data_dir.text().strip())
-        if not data_dir:
-            QMessageBox.warning(self, "오류", "데이터 폴더를 설정하세요.")
-            return
+        try:
+            from PyQt6.QtWidgets import QApplication
+            
+            data_dir = _resolve_data_dir(self.txt_data_dir.text().strip())
+            if not data_dir:
+                QMessageBox.warning(self, "오류", "데이터 폴더를 설정하세요.")
+                return
 
-        saved = 0
-        skipped = 0
-        errors = 0
+            saved = 0
+            skipped = 0
+            errors = 0
+            total = len(self._image_items)
 
-        for item in self._image_items:
-            label = item["label"]
-            # Bubble 레거시 라벨 정리
-            if label in LEGACY_BUBBLE_LABELS:
-                label = BUBBLE_LABEL
-            safe_label = label.replace("/", "_").replace("\\", "_").replace(" ", "_")
+            self.btn_save_classification.setEnabled(False)
 
-            label_dir = os.path.join(data_dir, safe_label)
-            os.makedirs(label_dir, exist_ok=True)
+            for idx, item in enumerate(self._image_items):
+                try:
+                    label = item["label"]
+                    # Bubble 레거시 라벨 정리
+                    if label in LEGACY_BUBBLE_LABELS:
+                        label = BUBBLE_LABEL
+                    safe_label = label.replace("/", "_").replace("\\", "_").replace(" ", "_")
 
-            src_path = item["path"]
-            dst_name = os.path.basename(src_path)
-            dst_path = os.path.join(label_dir, dst_name)
+                    label_dir = os.path.join(data_dir, safe_label)
+                    os.makedirs(label_dir, exist_ok=True)
 
-            # 이미 같은 이름 파일이 있으면 넘버링
-            if os.path.exists(dst_path) and os.path.normpath(src_path) != os.path.normpath(dst_path):
-                base, ext = os.path.splitext(dst_name)
-                counter = 1
-                while os.path.exists(dst_path):
-                    dst_path = os.path.join(label_dir, f"{base}_{counter}{ext}")
-                    counter += 1
+                    src_path = item["path"]
+                    dst_name = os.path.basename(src_path)
+                    dst_path = os.path.join(label_dir, dst_name)
 
+                    # 이미 같은 이름 파일이 있으면 넘버링
+                    if os.path.exists(dst_path) and os.path.normpath(src_path) != os.path.normpath(dst_path):
+                        base, ext = os.path.splitext(dst_name)
+                        counter = 1
+                        while os.path.exists(dst_path):
+                            dst_path = os.path.join(label_dir, f"{base}_{counter}{ext}")
+                            counter += 1
+
+                    if os.path.normpath(src_path) == os.path.normpath(dst_path):
+                        skipped += 1
+                        continue
+                    shutil.copy2(src_path, dst_path)
+                    saved += 1
+                except Exception as e:
+                    print(f"분류 저장 오류: {e}")
+                    errors += 1
+
+                # UI 응답 없음(프리징) 방지를 위해 10개마다 이벤트 루프 처리
+                if idx % 10 == 0:
+                    self.lbl_save_status.setText(f"저장 중... ({idx+1}/{total})")
+                    QApplication.processEvents()
+
+            # 데이터 폴더 경로 저장
+            _save_path_config(data_dir)
+
+            msg = f"저장 완료: {saved}개 저장"
+            if skipped:
+                msg += f", {skipped}개 이미 존재"
+            if errors:
+                msg += f", {errors}개 오류"
+            self.lbl_save_status.setText(msg)
+            
             try:
-                if os.path.normpath(src_path) == os.path.normpath(dst_path):
-                    skipped += 1
-                    continue
-                shutil.copy2(src_path, dst_path)
-                saved += 1
+                self._refresh_data_summary()
             except Exception as e:
-                print(f"분류 저장 오류: {e}")
-                errors += 1
+                print(f"새로고침 중 오류: {e}")
 
-        # 데이터 폴더 경로 저장
-        _save_path_config(data_dir)
+            QMessageBox.information(self, "분류 저장 완료", msg)
 
-        msg = f"저장 완료: {saved}개 저장"
-        if skipped:
-            msg += f", {skipped}개 이미 존재"
-        if errors:
-            msg += f", {errors}개 오류"
-        self.lbl_save_status.setText(msg)
-        self._refresh_data_summary()
-
-        QMessageBox.information(self, "분류 저장 완료", msg)
+        except Exception as e:
+            import traceback
+            err_msg = traceback.format_exc()
+            QMessageBox.critical(self, "치명적 오류 방지", f"저장 중 예상치 못한 시스템 오류가 발생했습니다.\n(프로그램 종료 방지됨)\n\n오류 내용:\n{str(e)}")
+            print(err_msg)
+        finally:
+            self.btn_save_classification.setEnabled(True)
 
     # ========== 학습 데이터/모델 ==========
 
