@@ -2226,13 +2226,24 @@ class MainWindow(QMainWindow):
                 layout.addWidget(bbox)
 
             def keyPressEvent(self, event):
-                # 숫자키 1~4 (또는 그 이상) 처리
-                key_txt = event.text()
-                if key_txt.isdigit():
-                    idx = int(key_txt) - 1
+                # 숫자키 1~9 처리
+                key = event.key()
+                mapping = {
+                    Qt.Key.Key_1: 0,
+                    Qt.Key.Key_2: 1,
+                    Qt.Key.Key_3: 2,
+                    Qt.Key.Key_4: 3,
+                    Qt.Key.Key_5: 4,
+                    Qt.Key.Key_6: 5,
+                    Qt.Key.Key_7: 6,
+                    Qt.Key.Key_8: 7,
+                    Qt.Key.Key_9: 8,
+                }
+                if key in mapping:
+                    idx = mapping[key]
                     if 0 <= idx < self.combo.count():
                         self.combo.setCurrentIndex(idx)
-                        self.accept() # 선택과 동시에 저장
+                        self.accept()
                         return
                 super().keyPressEvent(event)
 
