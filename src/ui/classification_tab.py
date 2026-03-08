@@ -427,10 +427,8 @@ class ClassificationTab(QWidget):
 
         existing_paths = {item["path"] for item in self._image_items}
         new_items = []
-        exclude_dirs = {"_originals", "_annotations", "__pycache__"}
-
         for root, dirs, files in os.walk(folder_path):
-            dirs[:] = [d for d in dirs if d not in exclude_dirs]
+            dirs[:] = [d for d in dirs if not d.startswith("_") and d != "__pycache__"]
             # 현재 폴더명을 라벨 후보로 사용
             folder_name = os.path.basename(root)
             # 라벨 폴더인지 판단 (알려진 라벨명과 일치하면)
@@ -741,11 +739,10 @@ class ClassificationTab(QWidget):
             self.lbl_data_summary.setText("폴더가 존재하지 않습니다.")
             return
 
-        exclude_dirs = ("_originals", "_annotations")
         summary_parts = []
         total = 0
         for item in sorted(os.listdir(data_dir)):
-            if item.startswith(".") or item in exclude_dirs:
+            if item.startswith("_") or item.startswith("."):
                 continue
             item_path = os.path.join(data_dir, item)
             if os.path.isdir(item_path):

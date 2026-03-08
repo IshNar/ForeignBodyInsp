@@ -310,6 +310,7 @@ class MainWindow(QMainWindow):
         self._last_annotation_label = None  # 어노테이션 ROI 다이얼로그에서 마지막 선택한 라벨
 
         self.init_ui()
+        self._load_settings()
 
     DEFECT_SAVE_DIR = r"D:\1. Projects\3. 2025\8. 검토\3. 바이오시료 이물검사\DefectImages"
 
@@ -597,11 +598,14 @@ class MainWindow(QMainWindow):
         self.slider_area.setRange(0, 500)
         self.slider_area.setValue(10)
         self.slider_area.valueChanged.connect(lambda v: self.lbl_area_value.setText(str(v)))
+        self.slider_area.valueChanged.connect(self._save_settings)
+        self.slider_thresh.valueChanged.connect(self._save_settings)
         settings_layout.addWidget(self.slider_area)
 
         chk_row = QHBoxLayout()
         self.chk_adaptive = QCheckBox("Adaptive Threshold")
         self.chk_adaptive.setChecked(True)
+        self.chk_adaptive.toggled.connect(self._save_settings)
         chk_row.addWidget(self.chk_adaptive)
         self.chk_draw_on_mainview = QCheckBox("MainView에 표시")
         self.chk_draw_on_mainview.setChecked(True)
@@ -1508,6 +1512,64 @@ class MainWindow(QMainWindow):
             return os.path.dirname(sys.executable)
         return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
+    def _load_settings(self):
+        """rule_params.json에서 설정을 로드하여 UI 및 객체에 반영."""
+        path = os.path.join(self._app_root(), "rule_params.json")
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            # 1. 일반 검출 (Threshold)
+            gen = data.get("classification", {})
+            self.slider_thresh.setValue(gen.get("threshold", 100))
+            self.slider_area.setValue(gen.get("min_area", 10))
+            self.chk_adaptive.setChecked(gen.get("use_adaptive", True))
+            self.open_kernel = gen.get("open_kernel", 2)
+            self.close_kernel = gen.get("close_kernel", 3)
+            self.classification_enabled = gen.get("classification_enabled", True)
+            self.general_enabled = gen.get("general_enabled", True)
+            self.bubble_show_text = gen.get("bubble_show_text", True)
+            
+            # 2. RuleBasedClassifier (핵심 로직용)
+            self.classifier.rule_based.set_params(gen)
+            
+            # 3. BubbleDetectorParams
+            bub = data.get("bubble_detection", {})
+            self.detector.bubble_params.set_params(bub)
+            
+            print(f"[MainWindow] 설정 로드 완료: {path}")
+        except Exception as e:
+            print(f"[MainWindow] 설정 로드 실패: {e}")
+
+    def _save_settings(self):
+        """현재 UI 상태를 rule_params.json에 자동 저장."""
+        # 무분별한 저장을 방지하려면 QTimer.singleShot(500, self._actually_save) 등을 쓸 수 있으나
+        # 현재 파라미터가 작으므로 직접 저장함.
+        path = os.path.join(self._app_root(), "rule_params.json")
+        
+        # RuleParamsDialog._collect_params()와 형식을 맞춤
+        data = {
+            "classification": {
+                "noise_contrast_threshold": self.classifier.rule_based.noise_contrast_threshold,
+                "threshold": self.slider_thresh.value(),
+                "min_area": self.slider_area.value(),
+                "use_adaptive": self.chk_adaptive.isChecked(),
+                "open_kernel": getattr(self, "open_kernel", 2),
+                "close_kernel": getattr(self, "close_kernel", 3),
+                "general_enabled": getattr(self, "general_enabled", True),
+                "classification_enabled": getattr(self, "classification_enabled", True),
+                "bubble_show_text": getattr(self, "bubble_show_text", True),
+            },
+            "bubble_detection": self.detector.bubble_params.get_params()
+        }
+        
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
     def _open_rule_params_dialog(self):
         """RuleBase 파라미터 설정 다이얼로그 열기. ROI 설정 시 crop, 아니면 전체 프레임 전달."""
         current_frame = getattr(self, "original_frame_full", None)
@@ -2064,11 +2126,14 @@ class MainWindow(QMainWindow):
             try:
                 resized = cv2.resize(img, (inner_sz, inner_sz), interpolation=cv2.INTER_AREA)
                 
-                # --- 디버그 이미지 좌측 상단에 이름 표기 ---
+                # --- 디버그 이미지 좌측 상단에 이름 표기 (동적 배경 박스) ---
                 is_gray = (len(resized.shape) == 2)
                 color_bg = 0 if is_gray else (0, 0, 0)
                 color_fg = 255 if is_gray else (255, 255, 255)
-                cv2.rectangle(resized, (0, 0), (100, 24), color_bg, -1)
+                
+                # 글자 길이에 맞춰 배경 박스 너비 조절
+                (tw, th), _ = cv2.getTextSize(title, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                cv2.rectangle(resized, (0, 0), (tw + 10, 24), color_bg, -1)
                 cv2.putText(resized, title, (5, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_fg, 1)
                 
                 if is_gray:
@@ -2255,27 +2320,17 @@ class MainWindow(QMainWindow):
                 bbox.rejected.connect(self.reject)
                 layout.addWidget(bbox)
 
-            def keyPressEvent(self, event):
-                # 숫자키 1~9 처리
-                key = event.key()
-                mapping = {
-                    Qt.Key.Key_1: 0,
-                    Qt.Key.Key_2: 1,
-                    Qt.Key.Key_3: 2,
-                    Qt.Key.Key_4: 3,
-                    Qt.Key.Key_5: 4,
-                    Qt.Key.Key_6: 5,
-                    Qt.Key.Key_7: 6,
-                    Qt.Key.Key_8: 7,
-                    Qt.Key.Key_9: 8,
-                }
-                if key in mapping:
-                    idx = mapping[key]
-                    if 0 <= idx < self.combo.count():
-                        self.combo.setCurrentIndex(idx)
-                        self.accept()
-                        return
-                super().keyPressEvent(event)
+                # 숫자 단축키 1 ~ 9 등록 (더 확실한 반응)
+                for i in range(min(9, len(labels))):
+                    key_seq = QKeySequence(str(i + 1))
+                    shortcut = QShortcut(key_seq, self)
+                    # lambda capture: i를 현재 값으로 고정 (i=i)
+                    shortcut.activated.connect(lambda idx=i: self._on_shortcut_activated(idx))
+
+            def _on_shortcut_activated(self, index):
+                if 0 <= index < self.combo.count():
+                    self.combo.setCurrentIndex(index)
+                    self.accept()
 
         dlg = AnnotationLabelDialog(self, labels, getattr(self, "_last_annotation_label", None))
 

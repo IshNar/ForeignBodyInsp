@@ -717,7 +717,7 @@ def train_classifier(data_dir: str, save_path: str, epochs: int = 50,
 
         raw_folders = [d for d in os.listdir(data_dir)
                        if os.path.isdir(os.path.join(data_dir, d))
-                       and d not in (DefectImageSaver.ORIGINALS_SUBDIR, DefectImageSaver.ANNOTATIONS_SUBDIR)]
+                       and not d.startswith("_")]
 
         def _folder_to_label(folder_name):
             return BUBBLE_LABEL if folder_name in LEGACY_BUBBLE_FOLDERS else folder_name
