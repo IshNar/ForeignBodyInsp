@@ -9,6 +9,8 @@ __pycache__/
 
 # Virtual Environment
 .venv/
+.venv_cpu/
+.vent_cpu/
 venv/
 ENV/
 
@@ -17,8 +19,20 @@ dist/
 build/
 *.spec
 
-# VS Code settings
+# VS Code / Editor
 .vscode/
+.cursorrules
+.agent/
+
+# Learned models (large binaries, machine-specific)
+*.pth
+*.onnx
+*.pt
+*_labels.json
+
+# Local config (paths, rule params — each machine can have own)
+rule_params.json
+path_config.json
 
 # Logs and temporary files
 *.log
