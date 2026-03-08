@@ -181,6 +181,7 @@ class ClassificationTab(QWidget):
         self.list_images.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.list_images.currentRowChanged.connect(self._on_item_selected)
         self.list_images.setMinimumHeight(200)
+        self.list_images.installEventFilter(self)
         load_layout.addWidget(self.list_images)
 
         # 라벨 변경 행
@@ -312,6 +313,15 @@ class ClassificationTab(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     # ========== 단축키 ==========
+
+    def eventFilter(self, source, event):
+        if source == self.list_images and event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            if key in (Qt.Key.Key_1, Qt.Key.Key_2, Qt.Key.Key_3, Qt.Key.Key_4, Qt.Key.Key_5,
+                       Qt.Key.Key_L, Qt.Key.Key_Delete):
+                self.keyPressEvent(event)
+                return True
+        return super().eventFilter(source, event)
 
     def keyPressEvent(self, event):
         """Classification 탭 전용 단축키 처리."""
