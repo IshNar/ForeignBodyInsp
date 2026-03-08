@@ -150,12 +150,17 @@ class DeepLearningClassifier:
             # 1. ONNX 모델 로드
             if path_abs.endswith('.onnx'):
                 import onnxruntime as ort
+                
+                sess_options = ort.SessionOptions()
+                sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                sess_options.intra_op_num_threads = (os.cpu_count() or 2) // 2
+                
                 providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
                 try:
-                    self.ort_session = ort.InferenceSession(path_abs, providers=providers)
+                    self.ort_session = ort.InferenceSession(path_abs, sess_options=sess_options, providers=providers)
                 except Exception as e:
                     print(f"[DL Classifier] CUDA 로드 실패, CPU로 폴백: {e}")
-                    self.ort_session = ort.InferenceSession(path_abs, providers=['CPUExecutionProvider'])
+                    self.ort_session = ort.InferenceSession(path_abs, sess_options=sess_options, providers=['CPUExecutionProvider'])
                 
                 # 라벨 파일 로드 (*_labels.json)
                 label_path = path_abs.replace('.onnx', '_labels.json')
@@ -237,17 +242,20 @@ class DeepLearningClassifier:
             if roi.size == 0:
                 continue
 
-            # INTER_LINEAR: INTER_AREA보다 ~30% 빠르고 품질 차이 거의 없음
+            # INTER_LINEAR: INTER_AREA보다 빠르고 차단율 좋음
             resized = cv2.resize(roi, (sz, sz), interpolation=cv2.INTER_LINEAR)
-            # BGR→RGB + float + normalize를 한 번에, (H,W,C)→(C,H,W) 직접 생성
-            rgb = resized[:, :, ::-1].astype(np.float32) / 255.0
-            roi_chw[j] = rgb.transpose(2, 0, 1)  # (3, H, W)
+            # C레벨에서 uint8 -> float32 자동 형변환 및 대입 (루프 내부에서 numpy 배열 생성 비용 제거)
+            roi_chw[j] = resized[:, :, ::-1].transpose(2, 0, 1)
             valid[j] = True
 
-        # valid만 뽑아서 일괄 normalize (벡터 연산)
+        # valid만 뽑아서 일괄 normalize (Python for루프 바깥에서 C단위 벡터 연산)
         valid_indices = np.where(valid)[0]
         if len(valid_indices) > 0:
-            roi_chw[valid_indices] = (roi_chw[valid_indices] - self._MEAN_CHW) / self._STD_CHW
+            v = roi_chw[valid_indices]
+            v /= 255.0
+            v -= self._MEAN_CHW
+            v /= self._STD_CHW
+            roi_chw[valid_indices] = v
 
         return roi_chw, valid, valid_indices
 
@@ -286,15 +294,15 @@ class DeepLearningClassifier:
             use_fp16 = getattr(self, '_use_fp16', False)
 
             CHUNK = 2048  # 더 큰 청크 → 오버헤드 감소
-            MINI_BATCH = 256  # FP16이면 메모리 절반 → 배치 키울 수 있음
+            MINI_BATCH = 128  # 속도를 위해 128 미니배치
             all_conf = np.zeros(n, dtype=np.float32)
             all_pred = np.zeros(n, dtype=np.int64)
             valid_mask = np.zeros(n, dtype=bool)
 
-            # CPU/GPU 파이프라인: CPU가 다음 청크를 crop하는 동안 GPU가 현재 청크를 추론
+            # CPU/GPU 파이프라인 (작업 스레드를 2개 이상 주어 GPU 병목 완전 제거)
             chunk_ranges = [(s, min(s + CHUNK, n)) for s in range(0, n, CHUNK)]
 
-            with torch.inference_mode(), ThreadPoolExecutor(max_workers=1) as executor:
+            with torch.inference_mode(), ThreadPoolExecutor(max_workers=2) as executor:
                 # 첫 번째 청크를 미리 준비
                 future = executor.submit(
                     self._extract_rois_chunk, bboxes, frame_bgr,
@@ -321,15 +329,21 @@ class DeepLearningClassifier:
 
                     if getattr(self, 'ort_session', None) is not None:
                         # === ONNX Runtime 엔진 사용 ===
-                        # 입력 이름 추론
                         input_name = self.ort_session.get_inputs()[0].name
-                        ort_out = self.ort_session.run(None, {input_name: valid_rois})[0]
-                        # NumPy로 Softmax 계산
-                        max_out = np.max(ort_out, axis=1, keepdims=True)
-                        exp_out = np.exp(ort_out - max_out)
-                        probs = exp_out / np.sum(exp_out, axis=1, keepdims=True)
-                        conf_arr = np.max(probs, axis=1)
-                        idx_arr = np.argmax(probs, axis=1)
+                        chunk_conf, chunk_idx = [], []
+                        # ONNX도 일시적 VRAM 초과 방지를 위해 미니배치 단위로 추론
+                        for mb_start in range(0, len(valid_rois), MINI_BATCH):
+                            mb_rois = np.ascontiguousarray(valid_rois[mb_start:mb_start + MINI_BATCH])
+                            ort_out = self.ort_session.run(None, {input_name: mb_rois})[0]
+                            # NumPy로 Softmax 계산
+                            max_out = np.max(ort_out, axis=1, keepdims=True)
+                            exp_out = np.exp(ort_out - max_out)
+                            probs = exp_out / np.sum(exp_out, axis=1, keepdims=True)
+                            chunk_conf.append(np.max(probs, axis=1))
+                            chunk_idx.append(np.argmax(probs, axis=1))
+                        
+                        conf_arr = np.concatenate(chunk_conf) if chunk_conf else np.array([])
+                        idx_arr = np.concatenate(chunk_idx) if chunk_idx else np.array([])
                     else:
                         # === 기존 PyTorch 엔진 사용 ===
                         batch_tensor = torch.from_numpy(
@@ -867,15 +881,19 @@ def train_classifier(data_dir: str, save_path: str, epochs: int = 50,
 
         # PyTorch 모델 및 가중치 저장 (.pth)
         os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
+        
+        base_path = save_path.rsplit('.', 1)[0]
+        pth_path = base_path + '.pth'
+        onnx_path = base_path + '.onnx'
+        label_path = base_path + '_labels.json'
+        
         torch.save({
             "model_state_dict": model.state_dict(),
             "labels": labels,
-        }, save_path)
-        print(f"[Train] PyTorch 모델 저장 완료: {save_path}")
+        }, pth_path)
+        print(f"[Train] PyTorch 모델 저장 완료: {pth_path}")
 
         # ONNX 포맷 형변환 및 저장 (.onnx)
-        onnx_path = save_path.rsplit('.', 1)[0] + '.onnx'
-        label_path = save_path.rsplit('.', 1)[0] + '_labels.json'
         
         try:
             model.eval()

@@ -8,3 +8,4 @@ torchvision
 ultralytics
 onnxruntime-gpu
 pyinstaller
+onnxscript
