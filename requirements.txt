@@ -5,6 +5,7 @@ numpy
 scikit-image
 torch
 torchvision
+kornia
 ultralytics
 onnxruntime-gpu
 pyinstaller

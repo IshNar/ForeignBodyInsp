@@ -6,31 +6,30 @@
 
 ## 🗂️ 프로젝트 폴더 구조 한눈에 보기
 
-```
-ForeignBodyInsp-vial-inspection-system/
-├── src/
-│   ├── main.py                  ← 프로그램 진입점 (C++의 main.cpp)
-│   ├── core/                    ← 핵심 비즈니스 로직 (엔진)
-│   │   ├── __init__.py
-│   │   ├── detection.py         ← 이물질 검출 엔진
-│   │   ├── classification.py    ← 분류 엔진 (Rule + DL + 학습)
-│   │   ├── yolo_dataset.py      ← YOLO 학습 데이터 생성 유틸
-│   │   └── yolo_detector.py     ← YOLO 검출 래퍼
-│   ├── hardware/                ← 하드웨어 추상화 계층 (HAL)
-│   │   ├── __init__.py
-│   │   ├── camera_interface.py  ← 카메라 인터페이스 (C++의 순수 가상 클래스)
-│   │   ├── basler_camera.py     ← Basler GigE 카메라 구현체
-│   │   └── file_camera.py       ← 파일/영상 로더 (테스트용 Mock)
-│   └── ui/                      ← GUI 계층 (PyQt6)
-│       ├── __init__.py
-│       ├── main_window.py       ← 메인 윈도우 (2370줄, 가장 큰 파일)
-│       ├── classification_tab.py ← 분류 학습 탭
-│       ├── yolo_annotation_tab.py ← YOLO 어노테이션 탭
-│       ├── rule_params_dialog.py ← 검출 파라미터 설정 다이얼로그
-│       └── basler_settings_dialog.py ← Basler 카메라 설정 다이얼로그
-├── build_exe.py                 ← PyInstaller 빌드 스크립트 (생략)
-├── verify_algorithm.py          ← 알고리즘 검증용 CLI 스크립트
-└── doc/                         ← 문서
+```mermaid
+graph LR
+    Root["ForeignBodyInsp/"]
+    
+    Root --> Src["src/ (C++ main.cpp 대응)"]
+    Src --> Main["main.py (진입점)"]
+    
+    Src --> Core["core/ (핵심 엔진 / .lib 대응)"]
+    Core --> Det["detection.py (검출)"]
+    Core --> Cls["classification.py (분류)"]
+    Core --> YD["yolo_dataset.py / detector"]
+    
+    Src --> HW["hardware/ (HAL / 드라이버)"]
+    HW --> CI["camera_interface (인터페이스)"]
+    HW --> BC["basler_camera.py"]
+    HW --> FC["file_camera.py (Mock)"]
+    
+    Src --> UI["ui/ (Qt GUI 레이어)"]
+    UI --> MW["main_window.py (메인)"]
+    UI --> Tabs["*_tab.py (학습/어노테이션)"]
+    UI --> Dlgs["*_dialog.py (설정)"]
+    
+    Root --> Doc["doc/ (문서)"]
+    Root --> Ver["verify_algorithm.py"]
 ```
 
 > **C++ 비유**: `src/core/`는 `.lib` 정적 라이브러리, `src/hardware/`는 HAL 드라이버, `src/ui/`는 MFC/Qt GUI 레이어에 해당합니다.
@@ -81,57 +80,56 @@ def main():
 
 # 📁 Part 2: 핵심 엔진 (`src/core/`)
 
-## [detection.py](../../src/core/detection.py#L1) — 362줄
+## [detection.py](../../src/core/detection.py#L1) — 약 483줄
 
 > **역할**: 이미지에서 이물질(Foreign Body)과 기포(Bubble)의 **위치**를 찾는 검출 엔진.
 
-### 클래스: [`BubbleDetectorParams`](../../src/core/detection.py#L6) *(L6-55)*
+### 클래스: [`BubbleDetectorParams`](../../src/core/detection.py#L24) *(L24-73)*
 기포 검출에 사용되는 파라미터를 묶어 관리하는 **데이터 클래스** (C++의 `struct`에 가깝습니다).
 
 | 필드 | 기본값 | 설명 |
 |------|--------|------|
-| `open_kernel` | 151 | 배경 평탄화용 모폴로지 커널 크기 |
+| `bg_open_ksize` | 61 | 배경 평탄화용 모폴로지 커널 크기 |
 | `clahe_clip` | 2.0 | 대비 향상(CLAHE) 강도 |
-| `dog_sigma_low/high` | 1.0 / 3.0 | DoG (Difference of Gaussians) 밴드패스 필터 시그마 |
-| `mad_k` | 3.5 | MAD 기반 적응 임계값의 민감도 |
-| `min_diameter` / `max_diameter` | 5 / 100 | 버블 크기 필터(px) |
+| `sigma_small` / `sigma_large` | 1.2 / 6.0 | DoG (Difference of Gaussians) 밴드패스 필터 시그마 |
+| `thr_k` | 4.0 | MAD 기반 적응 임계값의 민감도 |
+| `min_diameter` / `max_diameter` | 8 / 100 | 버블 크기 필터(px) |
 | `circularity_min` | 0.35 | 원형도 하한 (1.0이면 완벽한 원) |
 
 **메서드:**
-- [`get_params()`](../../src/core/detection.py#L43) *(L43-44)* → `dict` 반환 (JSON 직렬화용)
-- [`set_params()`](../../src/core/detection.py#L46) *(L46-55)* → dict에서 파라미터 복원
+- [`get_params()`](../../src/core/detection.py#L61) *(L61-62)* → `dict` 반환 (JSON 직렬화용)
+- [`set_params()`](../../src/core/detection.py#L64) *(L64-73)* → dict에서 파라미터 복원
 
 ---
 
-### 클래스: [`ForeignBodyDetector`](../../src/core/detection.py#L58) *(L58-361)*
+### 클래스: [`ForeignBodyDetector`](../../src/core/detection.py#L76) *(L76-420)*
 실제 검출 로직을 담당하는 핵심 클래스입니다.
 
-#### [`detect_static()`](../../src/core/detection.py#L63) *(L63-142)*
+#### [`detect_static()`](../../src/core/detection.py#L81) *(L81-195)*
 일반 이물질(Particle, Fiber 등)을 검출합니다.
 
 **처리 요약:**
-1. 그레이스케일 변환
-2. 모폴로지 `open/close`로 배경 노이즈 제거
-3. 이진화 (Threshold 또는 Adaptive)
-4. `cv2.findContours()`로 외곽선 추출
-5. 면적 필터링 (`min_area` 이하 제거)
-6. (옵션) Bubble 검출 결과와 합침 (`_merge_contours`)
+1. 그레이스케일 변환 (다운샘플 옵션 포함)
+2. GaussianBlur → 이진화 (Threshold 또는 Adaptive) → Morphology Open/Close
+3. `cv2.findContours()`로 외곽선 추출
+4. 면적 필터링 (`min_area` 이하 제거)
+5. (옵션) Bubble 검출 결과와 합침 (`_merge_contours`)
 
 > **C++ 비유**: OpenCV의 `cv::findContours()`, `cv::threshold()`를 직접 쓰는 것과 동일합니다.
 
-#### [`detect_bubbles()`](../../src/core/detection.py#L151) *(L151-298)*
+#### [`detect_bubbles()`](../../src/core/detection.py#L203) *(L203-368)*
 기포 전용 검출 파이프라인입니다. 일반 이물질보다 훨씬 정교한 전처리를 거칩니다.
 
 **처리 요약 (7단계):**
 1. **Morphological Opening 배경 평탄화**: 큰 커널로 배경을 추정하고 빼기
 2. **양극성 차이 맵**: 밝은 영역과 어두운 영역을 동시에 감지
-3. **CLAHE 대비 향상**: 로컬 대비를 높여 미세 기포 강조
-4. **DoG 밴드패스 필터**: 특정 크기의 구조만 통과시키는 주파수 필터
-5. **MAD 적응 임계**: 중앙값 + k×MAD로 동적 임계값 결정 (고정 Threshold보다 강건)
-6. **Morphology 정리**: 작은 구멍 메우기, 노이즈 제거
-7. **형상 필터**: 원형도, 종횡비, 크기로 최종 필터링
+3. **CLAHE 대비 향상** (선택): 로컬 대비를 높여 미세 기포 강조
+4. **노이즈 제거**: Median / Bilateral
+5. **DoG 밴드패스 필터**: 특정 크기의 구조만 통과시키는 주파수 필터
+6. **MAD 적응 임계** → **Morphology 정리** (Close → Open)
+7. **형상 필터**: 원형도, 솔리디티, 종횡비, 크기로 최종 필터링
 
-#### [`_merge_contours()`](../../src/core/detection.py#L300) *(L300-354)*
+#### [`_merge_contours()`](../../src/core/detection.py#L421) *(L421-480)*
 두 검출 결과를 겹치지 않게 합칩니다.
 
 - **최적화 포인트**: 이전 O(n²) 루프를 **NumPy 브로드캐스팅으로 O(n)으로 벡터화**하여 10,000배 빨라졌습니다.
@@ -142,7 +140,7 @@ def main():
 
 ---
 
-## [classification.py](../../src/core/classification.py#L1) — 909줄
+## [classification.py](../../src/core/classification.py#L1) — 약 933줄
 
 > **역할**: 검출된 이물질을 **분류**(Bubble/Particle/Noise/Unknown)하는 엔진. 규칙 기반과 딥러닝 두 가지 방식을 모두 지원합니다.
 
@@ -156,16 +154,16 @@ CLASSIFICATION_INPUT_SIZE = 224  # 모든 학습·추론의 기준 이미지 크
 
 ---
 
-### 클래스: [`RuleBasedClassifier`](../../src/core/classification.py#L19) *(L19-125)*
-수학적 규칙(면적, 원형도, 종횡비)으로 분류하는 전통적 방식입니다.
+### 클래스: [`RuleBasedClassifier`](../../src/core/classification.py#L19) *(L19-119)*
+Contrast(중심 vs 배경 밝기) 기반으로 Noise_Dust / Particle 구분. Bubble은 detect_bubbles에서 검출된 contour만 해당 라벨 부여.
 
 **분류 기준 (기본값):**
 
 | 조건 | 결과 |
 |------|------|
-| 면적 ≤ `noise_max_area` (200) | Noise_Dust |
-| 원형도 ≥ `bubble_circularity` (0.6) 이고 면적 ≤ `bubble_max_area` (2000) | Bubble |
-| 위 둘 다 아님 | Particle |
+| Contrast < `noise_contrast_threshold` (30) | Noise_Dust |
+| Bubble 검출기에서 온 contour | Bubble |
+| 그 외 | Particle |
 
 **주요 메서드:**
 - [`classify()`](../../src/core/classification.py#L50) *(L50-54)* → 단일 분류 (dict 반환)
@@ -176,7 +174,7 @@ CLASSIFICATION_INPUT_SIZE = 224  # 모든 학습·추론의 기준 이미지 크
 
 ---
 
-### 클래스: [`DeepLearningClassifier`](../../src/core/classification.py#L128) *(L128-389)*
+### 클래스: [`DeepLearningClassifier`](../../src/core/classification.py#L121) *(L121-412)*
 사전 학습된 딥러닝 모델(EfficientNet-B0)로 분류합니다.
 
 **멤버 변수:**
@@ -188,12 +186,12 @@ CLASSIFICATION_INPUT_SIZE = 224  # 모든 학습·추론의 기준 이미지 크
 | `_device` | `str` | `"cuda"` 또는 `"cpu"` |
 | `_use_fp16` | `bool` | FP16 반정밀도 사용 여부 |
 
-#### [`load_model()`](../../src/core/classification.py#L143) *(L143-204)*
+#### [`load_model()`](../../src/core/classification.py#L149) *(L149-214)*
 - `.onnx` 파일 → ONNX Runtime 세션으로 로드 (CUDAExecutionProvider 우선)
 - `.pth` 파일 → PyTorch 모델로 로드 (하위 호환)
 - 라벨 정보: `.onnx`는 `*_labels.json`, `.pth`는 checkpoint 내부에 저장
 
-#### [`_extract_rois_chunk()`](../../src/core/classification.py#L219) *(L219-252)*
+#### [`_extract_rois_chunk()`](../../src/core/classification.py#L230) *(L230-266)*
 **CPU에서 수행하는 헬퍼 함수** (GPU 파이프라인의 일부):
 1. 각 contour의 bbox 좌표로 **원본 BGR 이미지**에서 ROI 크롭
 2. 224×224로 INTER_LINEAR 리사이즈
@@ -203,14 +201,19 @@ CLASSIFICATION_INPUT_SIZE = 224  # 모든 학습·추론의 기준 이미지 크
 
 > **핵심 포인트**: 이 함수는 **원본 컬러 이미지에서 크롭**합니다. 전처리된 이진화 이미지가 아닙니다!
 
-#### [`classify_batch()`](../../src/core/classification.py#L254) *(L254-377)*
+#### [`classify_batch()`](../../src/core/classification.py#L268) *(L268-410)*
 10,000개 이상의 contour를 효율적으로 분류하는 핵심 메서드입니다.
 
 **파이프라인 구조:**
-```
-CPU Thread (ROI 추출)  ──→  GPU/ORT (추론)
-  ↓ future.submit()          ↓ .run() or model()
-  다음 청크 준비 중...        현재 청크 추론 중...
+```mermaid
+sequenceDiagram
+    participant CPU as CPU Thread (ROI 추출)
+    participant GPU as GPU/ORT (추론)
+    
+    Note over CPU: 다음 청크 준비 (future.submit)
+    CPU->>GPU: ROI 데이터 + 정규화 텐서 전달
+    Note over GPU: 현재 청크 추론 (.run() or model())
+    GPU-->>CPU: 클래스 확률 벡터 반환
 ```
 
 1. **청크 분할**: 2048개씩 나눔 (`CHUNK = 2048`)
@@ -221,7 +224,7 @@ CPU Thread (ROI 추출)  ──→  GPU/ORT (추론)
 
 ---
 
-### 클래스: [`ParticleClassifier`](../../src/core/classification.py#L394) *(L394-422)*
+### 클래스: [`ParticleClassifier`](../../src/core/classification.py#L414) *(L414-442)*
 **RuleBased와 DeepLearning을 통합하는 파사드(Facade) 클래스**입니다.
 
 > **C++ 비유**: `Strategy Pattern`의 Context 역할. 내부에 두 개의 전략 객체를 들고, `use_deep_learning` 플래그에 따라 분기합니다.
@@ -236,22 +239,25 @@ class ParticleClassifier:
 
 ---
 
-### 클래스: [`DefectImageSaver`](../../src/core/classification.py#L425) *(L425-601)*
+### 클래스: [`DefectImageSaver`](../../src/core/classification.py#L445) *(L445-573)*
 검출된 결함을 라벨별 폴더에 BMP 파일로 저장하는 유틸리티입니다.
 
 **저장 구조:**
 ```
-ClassificationData/
-├── Bubble/         ← 기포 이미지 (224×224)
-├── Particle/       ← 이물질 이미지
-├── Noise_Dust/     ← 노이즈 이미지
-├── _originals/     ← 원본 전체 프레임 보관
-├── _annotations/   ← JSON 메타데이터
-└── _misclassified/ ← 학습 후 오분류 이미지 (디버깅용)
+```mermaid
+graph LR
+    Root["ClassificationData/"]
+    Root --> B["Bubble/ (기포 이미지 224x224)"]
+    Root --> P["Particle/ (이물질 이미지)"]
+    Root --> N["Noise_Dust/ (노이즈 이미지)"]
+    Root --> O["_originals/ (원본 전체 프레임)"]
+    Root --> A["_annotations/ (JSON 메타데이터)"]
+    Root --> M["_misclassified/ (오분류 디버깅용)"]
+```
 ```
 
 **주요 메서드:**
-- [`save()`](../../src/core/classification.py#L508) *(L508-567)* → BMP 파일 저장, 경로 반환
+- [`save()`](../../src/core/classification.py#L520) *(L520-573)* → BMP 파일 저장, 경로 반환
 - [`parse_defect_filename()`](../../src/core/classification.py#L569) *(L569-587)* → 파일명에서 메타데이터(좌표, 라벨) 파싱
 - [`save_original()`](../../src/core/classification.py#L494) *(L494-506)* → 원본 프레임 보관
 
@@ -423,11 +429,11 @@ class CameraSource(ABC):  # ABC = Abstract Base Class (C++의 '= 0' 순수가상
 
 # 📁 Part 4: GUI 레이어 (`src/ui/`)
 
-## [main_window.py](../../src/ui/main_window.py#L1) — 2370줄
+## [main_window.py](../../src/ui/main_window.py#L1) — 약 3000줄
 
-> **역할**: 프로그램의 **메인 윈도우(뼈대)**. 모든 UI 요소, 이벤트 처리, 타이머, 검사 파이프라인 통합이 이 파일에 있습니다.
+> **역할**: 프로그램의 **메인 윈도우(뼈대)**. 모든 UI 요소, 이벤트 처리, 타이머, 검사 파이프라인 통합, User/Maker/Viewer 모드가 이 파일에 있습니다.
 
-### 클래스: [`DetectionWorker(QThread)`](../../src/ui/main_window.py#L28) *(L28-240)*
+### 클래스: [`DetectionWorker(QThread)`](../../src/ui/main_window.py#L30) *(L30-275)*
 검사를 **백그라운드 스레드**에서 실행하여 UI가 멈추지 않게 합니다.
 
 > **C++ 비유**: `QThread`를 상속받아 `run()`을 오버라이드 하는 것은 C++ Qt와 100% 동일합니다.
@@ -443,9 +449,9 @@ class CameraSource(ABC):  # ABC = Abstract Base Class (C++의 '= 0' 순수가상
 
 ---
 
-### 클래스: [`MainWindow(QMainWindow)`](../../src/ui/main_window.py#L243) *(L243-2369)* — 핵심
+### 클래스: [`MainWindow(QMainWindow)`](../../src/ui/main_window.py#L247) *(L247-2998)* — 핵심
 
-#### [생성자 `__init__()`](../../src/ui/main_window.py#L244) *(L244-298)* 에서 초기화하는 주요 멤버
+#### [생성자 `__init__()`](../../src/ui/main_window.py#L248) *(L248-328)* 에서 초기화하는 주요 멤버
 
 | 변수 | 타입 | 설명 |
 |------|------|------|
@@ -459,25 +465,31 @@ class CameraSource(ABC):  # ABC = Abstract Base Class (C++의 '= 0' 순수가상
 | `zoom_factor` | `float` | 뷰 확대 배율 |
 | `view_cx, view_cy` | `float` | 뷰 중심 좌표 (패닝용) |
 
-#### [`init_ui()`](../../src/ui/main_window.py#L302) *(L302-752)* — UI 레이아웃 구축 (약 450줄)
+#### [`init_ui()`](../../src/ui/main_window.py#L332) *(L332-950)* — UI 레이아웃 구축 (메뉴, 탭, Main/Classification/YOLO 탭, 스플리터, Basler/Inspection/Settings/Results, Viewer 모드용 위젯 등)
 
 **레이아웃 구조:**
-```
-MainWindow
-├── QTabWidget (탭 위젯)
-│   ├── Tab 0: Main (검사 화면)
-│   │   ├── Left: 이미지 뷰 (QScrollArea + QLabel)
-│   │   └── Right: 컨트롤 패널
-│   │       ├── 카메라/파일 연결 버튼
-│   │       ├── Threshold/Exposure 슬라이더
-│   │       ├── ROI 설정 버튼
-│   │       ├── 검사 시작/정지 버튼
-│   │       ├── 디버그 이미지 패널
-│   │       ├── Results 리스트 (검출 결과)
-│   │       └── Defect View (선택된 결함 확대)
-│   ├── Tab 1: Classification (학습 탭)
-│   └── Tab 2: YOLO Annotation (YOLO 어노테이션 탭)
-└── 상태바
+```mermaid
+graph LR
+    MW[MainWindow] --> SB[상태바]
+    MW --> TW[QTabWidget]
+    
+    TW --> T0[Tab 0: Main - 검사 화면]
+    TW --> T1[Tab 1: Classification - 학습]
+    TW --> T2[Tab 2: YOLO Annotation - 어노테이션]
+    
+    subgraph "Main Tab Layout"
+    T0 --> Left[Left: 이미지 뷰]
+    Left --> QS[QScrollArea + QLabel]
+    
+    T0 --> Right[Right: 컨트롤 패널]
+    Right --> B1[카메라/파일 연결 버튼]
+    Right --> B2[Threshold/Exposure 슬라이더]
+    Right --> B3[ROI 설정 버튼]
+    Right --> B4[검사 시작/정지 버튼]
+    Right --> B5[디버그 이미지 패널]
+    Right --> B6[Results 리스트]
+    Right --> B7[Defect View - 결함 확대]
+    end
 ```
 
 #### 주요 메서드 그룹
@@ -546,17 +558,22 @@ MainWindow
 ### 클래스: [`ClassificationTab(QWidget)`](../../src/ui/classification_tab.py#L113) *(L113-764)*
 
 **UI 구성:**
-```
-┌─ 데이터 폴더 지정 ────────────────────────┐
-│ [폴더 경로] [변경] [열기]                   │
-├─ 이미지 목록 (QTableWidget) ───────────────┤
-│ # | 파일명 | 라벨 | 미리보기              │
-├─ 미리보기 패널 ────────────────────────────┤
-│ [이미지 프리뷰] [라벨 콤보박스] [적용]      │
-├─ 학습 설정 ────────────────────────────────┤
-│ 모델 저장 경로 | Epochs | [학습 시작]       │
-│ [프로그레스 바]                             │
-└────────────────────────────────────────────┘
+```mermaid
+graph LR
+    CT[Classification Tab]
+    
+    CT --> P1[데이터 폴더 지정]
+    P1 --> B1["[폴더 경로] [변경] [열기]"]
+    
+    CT --> P2["이미지 목록 (QTableWidget)"]
+    P2 --> H1["# | 파일명 | 라벨 | 미리보기"]
+    
+    CT --> P3[미리보기 패널]
+    P3 --> B2["[이미지 프리뷰] [라벨 콤보박스] [적용]"]
+    
+    CT --> P4[학습 설정]
+    P4 --> B3["모델 저장 경로 | Epochs | [학습 시작]"]
+    P4 --> B4["[프로그레스 바]"]
 ```
 
 **주요 메서드:**
@@ -608,18 +625,24 @@ YOLO 학습을 백그라운드에서 수행합니다.
 ### 클래스: [`YOLOAnnotationTab(QWidget)`](../../src/ui/yolo_annotation_tab.py#L322) *(L322-1028)*
 
 **UI 구성:**
-```
-┌─ 데이터셋 폴더 지정 ───────────────────────┐
-│ [폴더 경로] [생성/열기]                     │
-├─ 이미지 목록 ──────────────────────────────┤
-│ [이미지 파일 리스트] [이미지 추가] [자동라벨] │
-├─ 캔버스 (BboxCanvas) ─────────────────────┤
-│ [이미지 + BBox 오버레이]                    │
-├─ 어노테이션 정보 ──────────────────────────┤
-│ [bbox 목록] [라벨 선택] [삭제]              │
-├─ 학습 설정 ────────────────────────────────┤
-│ Epochs | ImgSize | Batch | [학습 시작]      │
-└────────────────────────────────────────────┘
+```mermaid
+graph LR
+    YT[YOLO Annotation Tab]
+    
+    YT --> P1[데이터셋 폴더 지정]
+    P1 --> B1["[폴더 경로] [생성/열기]"]
+    
+    YT --> P2[이미지 목록]
+    P2 --> B2["[파일 리스트] [이미지 추가] [자동라벨]"]
+    
+    YT --> P3["캔버스 (BboxCanvas)"]
+    P3 --> B3["[이미지 + BBox 오버레이]"]
+    
+    YT --> P4[어노테이션 정보]
+    P4 --> B4["[bbox 목록] [라벨 선택] [삭제]"]
+    
+    YT --> P5[학습 설정]
+    P5 --> B5["Epochs | ImgSize | Batch | [학습 시작]"]
 ```
 
 **주요 메서드:**
@@ -647,22 +670,23 @@ YOLO 학습을 백그라운드에서 수행합니다.
 ### 클래스: [`RuleParamsDialog(QDialog)`](../../src/ui/rule_params_dialog.py#L284) *(L284-1199)*
 
 **UI 구성 (왼쪽: 디버그 뷰, 오른쪽: 파라미터):**
-```
-┌─ 디버그 이미지 뷰 ──────┬─ 파라미터 패널 ─────────┐
-│ [ZoomableImageView]      │ 탭 1: 분류 조건          │
-│                          │  - Noise 최대 면적       │
-│ [뷰 선택 콤보박스]       │  - Bubble 원형도 최소    │
-│  1. 원본                 │  - Bubble 최대 면적      │
-│  2. Binary               │ 탭 2: Bubble 검출        │
-│  3. CLAHE                │  - Open Kernel           │
-│  4. Diff Map             │  - CLAHE Clip            │
-│  5. Bubble Binary        │  - DoG Sigma Low/High    │
-│  6. Final Result         │  - MAD K                 │
-│                          │  - Min/Max Diameter       │
-│                          │  - Circularity/Solidity   │
-│                          ├─────────────────────────┤
-│                          │ [저장] [로드] [확인]      │
-└──────────────────────────┴─────────────────────────┘
+```mermaid
+graph LR
+    RP[RuleParamsDialog]
+    
+    RP --> Left[왼쪽: 디버그 이미지 뷰]
+    Left --> V1["[ZoomableImageView]"]
+    Left --> V2["[뷰 선택 콤보박스]"]
+    V2 --> V3["1.원 / 2.Bin / 3.CLAHE / 4.Diff / 5.Bub / 6.Final"]
+    
+    RP --> Right[오른쪽: 파라미터 패널]
+    Right --> Tab1[탭 1: 분류 조건]
+    Tab1 --> T1I["Noise 면적 / Circularity / Max Area"]
+    
+    Right --> Tab2[탭 2: Bubble 검출]
+    Tab2 --> T2I["Kernel / CLAHE / DoG / MAD / Diameter / Circularity"]
+    
+    Right --> Bottom["[저장] [로드] [확인]"]
 ```
 
 **핵심 기능: 실시간 디바운스 디버깅**

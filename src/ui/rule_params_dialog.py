@@ -1058,6 +1058,7 @@ class RuleParamsDialog(QDialog):
             "close_kernel": self.spin_close_kernel.value(),
             "general_enabled": self.chk_general_enabled.isChecked(),
             "classification_enabled": self.group_classification.isChecked(),
+            "bubble_show_text": self.chk_bubble_show_text.isChecked(),
         }
 
     def _form_from_params(self, params: dict):
@@ -1186,14 +1187,15 @@ class RuleParamsDialog(QDialog):
         self.accept()
 
     def _auto_save(self):
-        """rule_params.json에 현재 파라미터를 자동 저장 (앱 재시작 시 복원)."""
+        """rule_params.json에 현재 파라미터를 자동 저장 (앱 재시작 시 복원). MainWindow에서도 동일 경로로 한 번 더 저장함."""
         path = _default_rule_params_path(self.app_root)
         data = {
             "classification": self._form_to_params(),
             "bubble_detection": self._bubble_to_params(),
         }
         try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[RuleParamsDialog] 설정 자동 저장 실패: {path} — {e}")

@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLineEdit
                              )
 from PyQt6.QtCore import Qt, QTimer, QSize, QEvent, QPointF, QPoint, QThread, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap, QShortcut, QKeySequence, QAction
+from PyQt6.QtGui import QImage, QPixmap, QShortcut, QKeySequence, QAction, QIcon, QFont, QShowEvent
 
 from src.core.detection import ForeignBodyDetector
 from src.core.classification import ParticleClassifier, DefectImageSaver, CLASSIFICATION_INPUT_SIZE
@@ -102,9 +102,16 @@ class DetectionWorker(QThread):
 
         t_prep = time.perf_counter()
 
-        # 1. 일반 검출 (detect_bubbles=False)
-        if getattr(self, "_general_enabled", True):
-            valid_contours, _ = detector.detect_static(
+        # 1·2. 일반 검출과 Bubble 검출을 병렬 실행 (고정 비용 절반 수준으로 단축)
+        import concurrent.futures
+        valid_contours = []
+        bubble_contours = []
+        bubble_debug = None
+
+        def run_general():
+            if not getattr(self, "_general_enabled", True):
+                return [], None
+            c, closed = detector.detect_static(
                 gray,
                 threshold=self._threshold,
                 min_area=self._min_area,
@@ -114,20 +121,26 @@ class DetectionWorker(QThread):
                 open_kernel=getattr(self, "_open_kernel", 2),
                 close_kernel=getattr(self, "_close_kernel", 3),
             )
-        else:
-            valid_contours = []
+            return c, closed
+
+        def run_bubble_only():
+            if not do_bubble:
+                return [], None
+            return detector.detect_bubbles(gray)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fut_gen = ex.submit(run_general)
+            fut_bub = ex.submit(run_bubble_only)
+            valid_contours, closed = fut_gen.result()
+            bubble_contours, bubble_debug = fut_bub.result()
+
+        if not getattr(self, "_general_enabled", True):
             detector.last_debug = {"gray": gray}
+        if bubble_debug and getattr(detector, "last_debug", None) is not None:
+            detector.last_debug["bubble_debug"] = bubble_debug
 
         t_detect = time.perf_counter()
-        
-        # 2. Bubble 검출
-        bubble_contours = []
-        if do_bubble:
-            bubble_contours, bubble_debug = detector.detect_bubbles(gray)
-            if bubble_debug and getattr(detector, "last_debug", None) is not None:
-                detector.last_debug["bubble_debug"] = bubble_debug
-
-        t_bubble = time.perf_counter()
+        t_bubble = t_detect
                 
         # 3. 우선순위 병합 (Bubble 우선)
         if bubble_contours and valid_contours:
@@ -258,7 +271,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Vial Foreign Body Inspection [User]")
         self.resize(1200, 800)
+        self._set_window_icon()
         self._maker_mode = False  # User/Maker 모드 플래그
+        self._viewer_mode = False  # Viewer 모드: 좌측 Debug/Defect 패널 숨김, Main View 확대
+        self._layout_warmup_done = False  # 표시 후 1회 레이아웃 warm-up 실행 여부
 
         self.camera = None
         self.detector = ForeignBodyDetector()
@@ -327,14 +343,42 @@ class MainWindow(QMainWindow):
         act_restart.triggered.connect(self._restart_application)
         menu_help.addAction(act_restart)
 
-        # === 탭 위젯 (MFC Multi-Doc Template 스타일) ===
+        # === 탭 위젯 ===
         self.tab_widget = QTabWidget()
         self.setCentralWidget(self.tab_widget)
+
+        # 설정/도움말(메뉴 바)과 같은 줄에 로고 + NOVAnix-FVW101 오버레이
+        self._tab_branding = QWidget(self)
+        self._tab_branding.setStyleSheet("background: transparent;")
+        self._tab_branding.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        branding_layout = QHBoxLayout(self._tab_branding)
+        branding_layout.setContentsMargins(0, 0, 0, 0)
+        branding_layout.setSpacing(10)
+        self.header_logo_label = QLabel()
+        self.header_logo_label.setScaledContents(False)
+        self.header_logo_label.setStyleSheet("background: transparent;")
+        logo_path = self._logo_path()
+        if logo_path and os.path.isfile(logo_path):
+            pix = QPixmap(logo_path)
+            if not pix.isNull():
+                self._logo_pixmap_orig = pix
+                self.header_logo_label.setPixmap(pix.scaledToHeight(56, Qt.TransformationMode.SmoothTransformation))
+        branding_layout.addWidget(self.header_logo_label)
+        self.header_title_label = QLabel("NOVAnix-DVI")
+        self.header_title_label.setStyleSheet("color: white; font-size: 45px; font-weight: normal; background: transparent;")
+        branding_layout.addWidget(self.header_title_label)
+        self._tab_branding.adjustSize()
+        self._tab_branding.show()
+        self.installEventFilter(self)
+        self.tab_widget.tabBar().installEventFilter(self)
+        QTimer.singleShot(50, self._update_tab_branding_pos)
 
         # --- Main Tab ---
         main_tab = QWidget()
         self.main_tab = main_tab
         main_layout = QHBoxLayout(main_tab)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        self._main_layout = main_layout
         self.tab_widget.addTab(main_tab, "Main (검사)")
 
         # --- Classification Tab ---
@@ -366,13 +410,16 @@ class MainWindow(QMainWindow):
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image_label.setStyleSheet("background-color: black; color: white;")
         self.image_label.setScaledContents(False)  # keep pixmap size; use scroll for large
-        self.image_label.setMinimumSize(400, 300)
+        # 로딩된 이미지/동영상 크기로 레이아웃 최소 높이가 커지지 않도록 축소 허용
+        self.image_label.setMinimumSize(1, 1)
+        self.image_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
 
         # Scroll area to prevent window resizing with large images
         self.image_scroll = QScrollArea()
         self.image_scroll.setWidgetResizable(True)
         self.image_scroll.setWidget(self.image_label)
         self.image_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_scroll.setMinimumHeight(0)
         # Capture wheel events for zoom control
         self.image_scroll.viewport().installEventFilter(self)
         self.image_label.installEventFilter(self)
@@ -383,6 +430,7 @@ class MainWindow(QMainWindow):
         # Debug panel (left): Static Box 크기는 260 유지, 이미지만 230/238로 표시 + 이미지 간 여백
         self.debug_labels = {}
         debug_panel = QWidget()
+        self._debug_panel = debug_panel
         debug_panel_layout = QVBoxLayout(debug_panel)
         debug_panel_layout.setContentsMargins(4, 4, 4, 4)
         debug_panel_layout.setSpacing(12)
@@ -447,6 +495,8 @@ class MainWindow(QMainWindow):
         debug_panel_layout.addWidget(defect_group)
 
         debug_panel.setFixedWidth(556)  # 2*260 + spacing 12 + margins 12*2
+        debug_panel.setMinimumHeight(0)
+        debug_panel.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Ignored)
 
         # Mouse position / GrayValue display (original scale) and Defect Counts
         info_layout = QHBoxLayout()
@@ -464,6 +514,9 @@ class MainWindow(QMainWindow):
         info_layout.addStretch()
         info_layout.addWidget(self.lbl_defect_counts)
         info_layout.addWidget(self.lbl_tact_info)
+        self._info_layout = info_layout
+        self._info_row_widget = QWidget()
+        self._info_row_widget.setLayout(info_layout)
 
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
@@ -479,7 +532,14 @@ class MainWindow(QMainWindow):
         self._video_slider_just_sought = False  # 사용자가 방금 시크했으면 한 프레임 동안 슬라이더 동기화 스킵
         self.video_slider.sliderReleased.connect(self._on_video_slider_released)
         left_layout.addWidget(self.video_slider)
-        left_layout.addLayout(info_layout)
+        # 미리보기 하단: 파일 정보 (학습창과 유사하게 추가)
+        self.lbl_file_info = QLabel("")
+        self.lbl_file_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # 배율과 폰트 크기는 메인 윈도우 크기에 맞춰 조정 (27px은 너무 클 수 있으므로 22px 권장)
+        self.lbl_file_info.setStyleSheet("color: #888; font-size: 22px; padding: 4px;")
+        self.lbl_file_info.setFixedHeight(45)
+        left_layout.addWidget(self.lbl_file_info)
+        left_layout.addWidget(self._info_row_widget)
         # Accept drag/drop on main and child widgets
         self.setAcceptDrops(True)
         main_tab.setAcceptDrops(True)
@@ -555,6 +615,7 @@ class MainWindow(QMainWindow):
         source_layout.addLayout(load_row)
         source_group.setLayout(source_layout)
         control_layout.addWidget(source_group)
+        self._viewer_basler_group = source_group
 
         # Inspection Controls
         insp_group = QGroupBox("Inspection")
@@ -565,6 +626,23 @@ class MainWindow(QMainWindow):
         insp_layout.addWidget(self.btn_start)
         insp_group.setLayout(insp_layout)
         control_layout.addWidget(insp_group)
+        self._viewer_inspection_group = insp_group
+
+        # Viewer 모드용 Position/GrayValue/Tact 복제 라벨 (레이아웃 이동 없이 show/hide만)
+        self._viewer_info_widget = QWidget()
+        _vi_layout = QVBoxLayout(self._viewer_info_widget)
+        _vi_layout.setContentsMargins(4, 4, 4, 4)
+        _vi_layout.setSpacing(2)
+        self._viewer_lbl_mouse = QLabel("Position: —  GrayValue: —")
+        self._viewer_lbl_mouse.setStyleSheet("padding: 2px; font-family: monospace; font-size: 15px;")
+        self._viewer_lbl_mouse.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self._viewer_lbl_tact = QLabel("Tact: -")
+        self._viewer_lbl_tact.setStyleSheet("padding: 2px; font-family: monospace; color: #00ff00; font-size: 15px;")
+        self._viewer_lbl_tact.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        _vi_layout.addWidget(self._viewer_lbl_mouse)
+        _vi_layout.addWidget(self._viewer_lbl_tact)
+        control_layout.addWidget(self._viewer_info_widget)
+        self._viewer_info_widget.setVisible(False)
 
         # Settings
         settings_group = QGroupBox("Settings")
@@ -703,6 +781,7 @@ class MainWindow(QMainWindow):
 
         settings_group.setLayout(settings_layout)
         control_layout.addWidget(settings_group)
+        self._viewer_settings_group = settings_group
 
         # Results
         results_group = QGroupBox("Results")
@@ -755,7 +834,7 @@ class MainWindow(QMainWindow):
         results_layout.addWidget(self.list_results)
         results_group.setLayout(results_layout)
         control_layout.addWidget(results_group, 1)
-
+        self._viewer_results_group = results_group
 
         # Splitter: debug panel | main view | control panel
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -766,45 +845,63 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 0)   # debug panel fixed
         splitter.setStretchFactor(1, 4)   # main view
         splitter.setStretchFactor(2, 1)   # control panel
+        # 세로 최소 높이 전파 차단 (Viewer 전환 시 status bar 밀림 방지)
+        left_widget.setMinimumHeight(0)
+        left_widget.setSizePolicy(left_widget.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Expanding)
+        control_panel.setMinimumHeight(0)
+        control_panel.setSizePolicy(control_panel.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Expanding)
         # 탭 내부 스플리터 초기 사이즈 명시 (debug_panel 폭 보장)
         splitter.setSizes([556, 600, 300])
+        splitter.setCollapsible(0, True)  # Viewer 모드 시 폭 0으로 접기 허용
         splitter.setAcceptDrops(True)
         splitter.installEventFilter(self)
 
         main_layout.addWidget(splitter)
+        self._main_splitter = splitter
 
         # exe/프로젝트 루트에 rule_params.json 있으면 RuleBase + Bubble 파라미터 자동 로드
-        _rule_params_path = os.path.join(self._app_root(), "rule_params.json")
-        if os.path.isfile(_rule_params_path):
+        try:
+            _rule_params_path = os.path.join(self._app_root(), "rule_params.json")
+        except Exception:
+            _rule_params_path = None
+        if _rule_params_path and os.path.isfile(_rule_params_path):
             try:
                 with open(_rule_params_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                
                 cls_data = data.get("classification", data)
                 self.classifier.rule_based.set_params(cls_data)
-                
-                if "threshold" in cls_data:
-                    self.slider_thresh.setValue(int(cls_data["threshold"]))
-                if "min_area" in cls_data:
-                    self.slider_area.setValue(int(cls_data["min_area"]))
-                if "use_adaptive" in cls_data:
-                    self.chk_adaptive.setChecked(bool(cls_data["use_adaptive"]))
-                if "open_kernel" in cls_data:
-                    self.open_kernel = int(cls_data["open_kernel"])
-                if "close_kernel" in cls_data:
-                    self.close_kernel = int(cls_data["close_kernel"])
-                if "classification_enabled" in cls_data:
-                    self.classification_enabled = bool(cls_data["classification_enabled"])
-                if "general_enabled" in cls_data:
-                    self.general_enabled = bool(cls_data["general_enabled"])
-
-                if "bubble_detection" in data:
-                    bub_data = data["bubble_detection"]
-                    self.detector.bubble_params.set_params(bub_data)
-                    if "bubble_show_text" in bub_data:
-                        self.bubble_show_text = bool(bub_data["bubble_show_text"])
-            except Exception:
-                pass
+                self.slider_thresh.blockSignals(True)
+                self.slider_area.blockSignals(True)
+                self.chk_adaptive.blockSignals(True)
+                try:
+                    if "threshold" in cls_data:
+                        self.slider_thresh.setValue(int(cls_data["threshold"]))
+                    if "min_area" in cls_data:
+                        self.slider_area.setValue(int(cls_data["min_area"]))
+                    if "use_adaptive" in cls_data:
+                        self.chk_adaptive.setChecked(bool(cls_data["use_adaptive"]))
+                    if "open_kernel" in cls_data:
+                        self.open_kernel = int(cls_data["open_kernel"])
+                    if "close_kernel" in cls_data:
+                        self.close_kernel = int(cls_data["close_kernel"])
+                    if "classification_enabled" in cls_data:
+                        self.classification_enabled = bool(cls_data["classification_enabled"])
+                    if "general_enabled" in cls_data:
+                        self.general_enabled = bool(cls_data["general_enabled"])
+                    if "bubble_show_text" in cls_data:
+                        self.bubble_show_text = bool(cls_data["bubble_show_text"])
+                    if "bubble_detection" in data:
+                        self.detector.bubble_params.set_params(data["bubble_detection"])
+                        if "bubble_show_text" in data["bubble_detection"]:
+                            self.bubble_show_text = bool(data["bubble_detection"]["bubble_show_text"])
+                finally:
+                    self.slider_thresh.blockSignals(False)
+                    self.slider_area.blockSignals(False)
+                    self.chk_adaptive.blockSignals(False)
+                self.lbl_thresh_value.setText(str(self.slider_thresh.value()))
+                self.lbl_area_value.setText(str(self.slider_area.value()))
+            except Exception as e:
+                print(f"[MainWindow] init_ui 설정 로드 실패: {_rule_params_path} — {e}")
         # exe 실행 시 exe 폴더에 classification_model.onnx 있으면 자동 로드
         if hasattr(sys, '_MEIPASS'):
             dl_model_loaded = False
@@ -831,11 +928,17 @@ class MainWindow(QMainWindow):
                     self.lbl_yolo_status.setStyleSheet("color: #0f0; font-size: 11px;")
                     break
 
-        # --- Status Bar: 모드 표시 및 로그인 버튼 ---
+        # --- Status Bar: 모드 표시, Viewer 토글, Maker 로그인 ---
         status_bar = self.statusBar()
         self._lbl_mode = QLabel("  🔒 User 모드  ")
         self._lbl_mode.setStyleSheet("font-weight: bold; color: #aaa;")
         status_bar.addPermanentWidget(self._lbl_mode)
+        self._btn_viewer = QPushButton("👁 Viewer")
+        self._btn_viewer.setFixedHeight(22)
+        self._btn_viewer.setStyleSheet("font-size: 11px; padding: 2px 8px;")
+        self._btn_viewer.setCheckable(True)
+        self._btn_viewer.clicked.connect(self._toggle_viewer_mode)
+        status_bar.addPermanentWidget(self._btn_viewer)
         self._btn_login = QPushButton("🔐 Maker 로그인")
         self._btn_login.setFixedHeight(22)
         self._btn_login.setStyleSheet("font-size: 11px; padding: 2px 8px;")
@@ -844,6 +947,26 @@ class MainWindow(QMainWindow):
 
         # 초기 모드 적용 (User 모드: YOLO 숨김)
         self._apply_mode()
+
+    def showEvent(self, event: QShowEvent):
+        super().showEvent(event)
+        if not self._layout_warmup_done:
+            QTimer.singleShot(0, self._post_show_layout_warmup)
+
+    def _post_show_layout_warmup(self):
+        """창 표시 후 1회만 실행: Viewer 토글 대상 위젯의 sizeHint를 실제 표시 상태에서 안정화."""
+        if self._layout_warmup_done:
+            return
+        self._layout_warmup_done = True
+        _lp = self._main_splitter.widget(0)
+        _lp.hide()
+        _lp.show()
+        self._viewer_settings_group.hide()
+        self._viewer_settings_group.show()
+        self._viewer_results_group.hide()
+        self._viewer_results_group.show()
+        self._viewer_info_widget.show()
+        self._viewer_info_widget.hide()
 
     def _on_tab_changed(self):
         """탭 전환 시: 포커스 전달 + Main 탭 벗어나면 영상 타이머 일시 정지."""
@@ -864,7 +987,12 @@ class MainWindow(QMainWindow):
                 self._timer_was_paused = True
                 self.timer.stop()
 
-    # ═══════════════════════ User / Maker 모드 ═══════════════════════
+    # ═══════════════════════ User / Maker / Viewer 모드 ═══════════════════════
+
+    def _toggle_viewer_mode(self):
+        """Viewer 모드 토글: 좌측 Debug Image / Defect View 숨김, Main View 확대."""
+        self._viewer_mode = self._btn_viewer.isChecked()
+        self._apply_mode()
 
     def _toggle_maker_mode(self):
         """Maker 모드 로그인/로그아웃 토글."""
@@ -891,8 +1019,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "인증 실패", "비밀번호가 올바르지 않습니다.")
 
     def _apply_mode(self):
-        """현재 _maker_mode 플래그에 따라 YOLO 관련 UI를 표시/숨김."""
+        """현재 _maker_mode, _viewer_mode에 따라 YOLO·좌측 패널·상태바 갱신."""
         maker = self._maker_mode
+        viewer = self._viewer_mode
 
         # 1) YOLO 관련 위젯 표시/숨김
         for w in self._yolo_widgets:
@@ -901,28 +1030,64 @@ class MainWindow(QMainWindow):
         # 2) YOLO 탭 관리
         tab_idx = self.tab_widget.indexOf(self.yolo_tab)
         if maker and tab_idx == -1:
-            # Maker: YOLO 탭 복원
             self.tab_widget.addTab(self.yolo_tab, self._yolo_tab_title)
         elif not maker and tab_idx != -1:
-            # User: YOLO 탭 제거 (위젯은 유지)
             self.tab_widget.removeTab(tab_idx)
-            # YOLO 모드였으면 Threshold 모드로 강제 전환
             if self.use_yolo_mode:
                 self.combo_inspect_mode.setCurrentIndex(0)
 
-        # 3) 타이틀바 갱신
-        mode_str = "Maker" if maker else "User"
+        # 3) Viewer 모드 (좌측 패널은 setVisible 대신 스플리터 폭 0으로만 접기)
+        if viewer:
+            self._saved_splitter_sizes = self._main_splitter.sizes()
+            total = sum(self._saved_splitter_sizes) if self._saved_splitter_sizes else 1456
+            right_w = self._saved_splitter_sizes[2] if len(self._saved_splitter_sizes) > 2 else 300
+            self._main_splitter.setSizes([0, max(400, total - right_w), right_w])
+            if hasattr(self, "_debug_panel"):
+                self._debug_panel.setMaximumHeight(0)
+            self._viewer_settings_group.setVisible(False)
+            self._viewer_results_group.setVisible(True)
+            self._viewer_info_widget.setVisible(True)
+            # 중앙 하단은 hide/show 대신 높이만 0으로 접어 세로 레이아웃 재계산 부작용 방지
+            self._info_row_widget.setMinimumHeight(0)
+            self._info_row_widget.setMaximumHeight(0)
+            self.lbl_file_info.setMinimumHeight(0)
+            self.lbl_file_info.setMaximumHeight(0)
+        else:
+            saved = getattr(self, "_saved_splitter_sizes", [556, 600, 300])
+            self._main_splitter.setSizes(saved)
+            if hasattr(self, "_debug_panel"):
+                self._debug_panel.setMaximumHeight(16777215)
+            self._viewer_settings_group.setVisible(True)
+            self._viewer_results_group.setVisible(True)
+            self._viewer_info_widget.setVisible(False)
+            self._info_row_widget.setMinimumHeight(0)
+            self._info_row_widget.setMaximumHeight(16777215)
+            self.lbl_file_info.setMinimumHeight(45)
+            self.lbl_file_info.setMaximumHeight(45)
+
+        # 4) 타이틀바 갱신
+        if viewer:
+            mode_str = "Viewer"
+        else:
+            mode_str = "Maker" if maker else "User"
         self.setWindowTitle(f"Vial Foreign Body Inspection [{mode_str}]")
 
-        # 4) 상태바 갱신
-        if maker:
-            self._lbl_mode.setText("  🔓 Maker 모드  ")
-            self._lbl_mode.setStyleSheet("font-weight: bold; color: #4fc3f7;")
-            self._btn_login.setText("🔒 User로 전환")
+        # 5) 상태바 갱신
+        self._btn_viewer.setChecked(viewer)
+        if viewer:
+            self._lbl_mode.setText("  👁 Viewer 모드  ")
+            self._lbl_mode.setStyleSheet("font-weight: bold; color: #81c784;")
+            self._btn_viewer.setText("👁 Viewer 끄기")
         else:
-            self._lbl_mode.setText("  🔒 User 모드  ")
-            self._lbl_mode.setStyleSheet("font-weight: bold; color: #aaa;")
-            self._btn_login.setText("🔐 Maker 로그인")
+            self._btn_viewer.setText("👁 Viewer")
+            if maker:
+                self._lbl_mode.setText("  🔓 Maker 모드  ")
+                self._lbl_mode.setStyleSheet("font-weight: bold; color: #4fc3f7;")
+                self._btn_login.setText("🔒 User로 전환")
+            else:
+                self._lbl_mode.setText("  🔒 User 모드  ")
+                self._lbl_mode.setStyleSheet("font-weight: bold; color: #aaa;")
+                self._btn_login.setText("🔐 Maker 로그인")
 
     # ═══════════════════════════════════════════════════════════════
 
@@ -1362,6 +1527,33 @@ class MainWindow(QMainWindow):
                 except Exception as save_err:
                     print(f"Defect 이미지 저장 준비 오류: {save_err}")
 
+            # --- 파일 정보 레이블 업데이트 (학습창 스타일) ---
+            if raw_frame is not None or full_frame is not None:
+                # 영상 크기는 항상 원본(전체 프레임) 기준
+                ref = full_frame if full_frame is not None else raw_frame
+                fh, fw = ref.shape[:2]
+                source_name = "Camera (Live)"
+                size_str = "-"
+                
+                if isinstance(self.camera, FileCamera) and hasattr(self.camera, 'source_path'):
+                    path = self.camera.source_path
+                    if path and os.path.isfile(path):
+                        source_name = os.path.basename(path)
+                        fsize = os.path.getsize(path)
+                        if fsize < 1024 * 1024:
+                            size_str = f"{fsize / 1024:.1f} KB"
+                        else:
+                            size_str = f"{fsize / 1024 / 1024:.1f} MB"
+                elif self.camera and self._is_basler_connected():
+                    source_name = "Basler Camera"
+                
+                info_parts = [source_name, f"영상 크기: {fw}×{fh}"]
+                if self.inspection_roi is not None:
+                    rx, ry, rw, rh = self.inspection_roi
+                    info_parts.append(f"검사 ROI: {int(rw)}×{int(rh)}")
+                info_parts.append(size_str)
+                self.lbl_file_info.setText("  |  ".join(info_parts))
+
             # --- 상태 업데이트 ---
             self.current_contours = contours
             self.current_frame_bgr = self.original_frame_full.copy() if self.original_frame_full is not None else None
@@ -1414,8 +1606,10 @@ class MainWindow(QMainWindow):
                     total_t = tact_times.get('total', 0) * 1000
                     tact_str = f"Tact: {total_t:.0f}ms"
                 self.lbl_tact_info.setText(tact_str)
+                self._viewer_lbl_tact.setText(tact_str)
             else:
                 self.lbl_tact_info.setText("Tact: -")
+                self._viewer_lbl_tact.setText("Tact: -")
 
             # 이미지 / Basler 단일 Grab / 동영상 멈춤 상태 1회 검사: 완료 후 버튼을 Start로 복귀
             single_shot = False
@@ -1512,44 +1706,123 @@ class MainWindow(QMainWindow):
             return os.path.dirname(sys.executable)
         return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
+    def _logo_path(self):
+        """상단 헤더 로고 이미지 경로 (logo_alpha.png)."""  
+        try:
+            root = self._app_root()
+            for rel in ("resource", "logo_alpha.png"), ("강로 UI 카피 해야됌", "resource", "logo_alpha.png"):
+                path = os.path.join(root, *rel)
+                if os.path.isfile(path):
+                    return path
+        except Exception:
+            pass
+        return None
+
+    def _update_tab_branding_pos(self):
+        """설정/도움말 + Main/Classification 탭 두 줄 전체 높이를 써서 로고·글자 표시 (잘리지 않음)."""
+        if not hasattr(self, "_tab_branding"):
+            return
+        mb = self.menuBar()
+        bar = self.tab_widget.tabBar()
+        row1_h = mb.height() if mb else 28
+        row2_h = bar.height()
+        total_h = row1_h + row2_h
+        # 두 줄 높이 안에 맞춤: 로고 3배·글자 2배 느낌 유지
+        base_logo_h = max((total_h - 16) // 2, 24)
+        logo_h = min(base_logo_h * 3, total_h - 12)
+        base_font_px = max(12, (total_h - 16) // 2)
+        font_px = min(base_font_px * 2, total_h - 8)
+        self.header_title_label.setStyleSheet(
+            "color: white; font-weight: normal; background: transparent;"
+        )
+        font = self.header_title_label.font()
+        font.setPixelSize(font_px)
+        font.setStretch(200)
+        self.header_title_label.setFont(font)
+        orig = getattr(self, "_logo_pixmap_orig", None)
+        if orig and not orig.isNull():
+            # 좌우 4배(400%), 위아래 1.3배
+            logo_w = int(orig.width() * (logo_h / orig.height()) * 3)
+            logo_h_scaled = int(logo_h * 1.3)
+            self.header_logo_label.setPixmap(orig.scaled(
+                logo_w, logo_h_scaled,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            ))
+        self._tab_branding.setMinimumHeight(total_h)
+        self._tab_branding.adjustSize()
+        bw = self._tab_branding.sizeHint().width()
+        bh = max(self._tab_branding.sizeHint().height(), total_h)
+        w = self.width()
+        x = max(0, (w - bw) // 2) + 120
+        y = 0
+        self._tab_branding.setGeometry(x, y, bw, total_h)
+        self._tab_branding.raise_()
+        self._tab_branding.show()
+
+    def _set_window_icon(self):
+        """좌상단 창 아이콘 설정. VialVolume2.ico 또는 icon.png 우선 사용."""
+        try:
+            root = self._app_root()
+            candidates = [
+                os.path.join(root, "강로 UI 카피 해야됌", "resource", "VialVolume2.ico"),
+                os.path.join(root, "assets", "VialVolume2.ico"),
+                os.path.join(root, "VialVolume2.ico"),
+                os.path.join(root, "assets", "icon.png"),
+                os.path.join(root, "icon.png"),
+            ]
+            for path in candidates:
+                if os.path.isfile(path):
+                    self.setWindowIcon(QIcon(path))
+                    return
+        except Exception:
+            pass
+
     def _load_settings(self):
         """rule_params.json에서 설정을 로드하여 UI 및 객체에 반영."""
-        path = os.path.join(self._app_root(), "rule_params.json")
+        try:
+            path = os.path.join(self._app_root(), "rule_params.json")
+        except Exception as e:
+            print(f"[MainWindow] 설정 경로 확인 실패: {e}")
+            return
         if not os.path.exists(path):
             return
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             
-            # 1. 일반 검출 (Threshold)
             gen = data.get("classification", {})
-            self.slider_thresh.setValue(gen.get("threshold", 100))
-            self.slider_area.setValue(gen.get("min_area", 10))
-            self.chk_adaptive.setChecked(gen.get("use_adaptive", True))
-            self.open_kernel = gen.get("open_kernel", 2)
-            self.close_kernel = gen.get("close_kernel", 3)
-            self.classification_enabled = gen.get("classification_enabled", True)
-            self.general_enabled = gen.get("general_enabled", True)
-            self.bubble_show_text = gen.get("bubble_show_text", True)
-            
-            # 2. RuleBasedClassifier (핵심 로직용)
-            self.classifier.rule_based.set_params(gen)
-            
-            # 3. BubbleDetectorParams
             bub = data.get("bubble_detection", {})
-            self.detector.bubble_params.set_params(bub)
-            
+            # 로드 중 valueChanged/toggled가 _save_settings를 호출해 JSON을 덮어쓰는 것 방지
+            self.slider_thresh.blockSignals(True)
+            self.slider_area.blockSignals(True)
+            self.chk_adaptive.blockSignals(True)
+            try:
+                self.slider_thresh.setValue(int(gen.get("threshold", 100)))
+                self.slider_area.setValue(int(gen.get("min_area", 10)))
+                self.chk_adaptive.setChecked(gen.get("use_adaptive", True))
+                self.open_kernel = int(gen.get("open_kernel", 2))
+                self.close_kernel = int(gen.get("close_kernel", 3))
+                self.classification_enabled = gen.get("classification_enabled", True)
+                self.general_enabled = gen.get("general_enabled", True)
+                self.bubble_show_text = gen.get("bubble_show_text", True)
+                self.classifier.rule_based.set_params(gen)
+                self.detector.bubble_params.set_params(bub)
+            finally:
+                self.slider_thresh.blockSignals(False)
+                self.slider_area.blockSignals(False)
+                self.chk_adaptive.blockSignals(False)
+            # 라벨은 시그널 차단으로 갱신 안 됐을 수 있음
+            self.lbl_thresh_value.setText(str(self.slider_thresh.value()))
+            self.lbl_area_value.setText(str(self.slider_area.value()))
             print(f"[MainWindow] 설정 로드 완료: {path}")
         except Exception as e:
-            print(f"[MainWindow] 설정 로드 실패: {e}")
+            print(f"[MainWindow] 설정 로드 실패: {path} — {e}")
+            import traceback
+            traceback.print_exc()
 
     def _save_settings(self):
         """현재 UI 상태를 rule_params.json에 자동 저장."""
-        # 무분별한 저장을 방지하려면 QTimer.singleShot(500, self._actually_save) 등을 쓸 수 있으나
-        # 현재 파라미터가 작으므로 직접 저장함.
-        path = os.path.join(self._app_root(), "rule_params.json")
-        
-        # RuleParamsDialog._collect_params()와 형식을 맞춤
         data = {
             "classification": {
                 "noise_contrast_threshold": self.classifier.rule_based.noise_contrast_threshold,
@@ -1564,12 +1837,15 @@ class MainWindow(QMainWindow):
             },
             "bubble_detection": self.detector.bubble_params.get_params()
         }
-        
         try:
+            path = os.path.join(self._app_root(), "rule_params.json")
+            root = os.path.dirname(path)
+            if root:
+                os.makedirs(root, exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[MainWindow] 설정 저장 실패: {e}")
     def _open_rule_params_dialog(self):
         """RuleBase 파라미터 설정 다이얼로그 열기. ROI 설정 시 crop, 아니면 전체 프레임 전달."""
         current_frame = getattr(self, "original_frame_full", None)
@@ -1610,7 +1886,8 @@ class MainWindow(QMainWindow):
             self.classification_enabled = gen["classification_enabled"]
             self.general_enabled = gen["general_enabled"]
             self.bubble_show_text = gen["bubble_show_text"]
-            
+            # 확인 시 rule_params.json에 저장 (재실행 시 복원)
+            self._save_settings()
             # (선택) 설정 변경 즉시 재검사 하려면 주석 해제 (단, 정지 상태에서만)
             if not self.timer.isActive() and current_frame is not None:
                 self.update_frame()
@@ -2051,7 +2328,9 @@ class MainWindow(QMainWindow):
         px = max(0, min(px, w - 1))
         py = max(0, min(py, h - 1))
         gray_val = int(self.current_gray[py, px])
-        self.lbl_mouse_info.setText(f"Position: ({px}, {py})  GrayValue: {gray_val}")
+        txt = f"Position: ({px}, {py})  GrayValue: {gray_val}"
+        self.lbl_mouse_info.setText(txt)
+        self._viewer_lbl_mouse.setText(txt)
 
     def view_to_image_coords(self, view_pos):
         """Convert viewport position to original image coordinates"""
@@ -2449,7 +2728,6 @@ class MainWindow(QMainWindow):
         pix = QPixmap.fromImage(qt_img)
         if not pix.isNull():
             self.image_label.setPixmap(pix)
-            self.image_label.resize(pix.size())
 
 
     # ---- Drag & Drop ----
@@ -2544,6 +2822,12 @@ class MainWindow(QMainWindow):
             super().wheelEvent(event)
 
     def eventFilter(self, obj, event):
+        if obj == self and event.type() == QEvent.Type.Resize:
+            QTimer.singleShot(0, self._update_tab_branding_pos)
+            return False
+        if obj == self.tab_widget.tabBar() and event.type() in (QEvent.Type.Resize, QEvent.Type.Move):
+            QTimer.singleShot(0, self._update_tab_branding_pos)
+            return False
         if event.type() == QEvent.Type.Wheel and (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
             if obj in (self.image_scroll.viewport(), self.image_label):
                 delta = event.angleDelta().y()

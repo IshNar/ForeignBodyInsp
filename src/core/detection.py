@@ -3,6 +3,23 @@ import cv2
 import numpy as np
 import concurrent.futures
 
+# OpenCV 내부 병렬화: 0 = 기본 스레드 수 사용 (GaussianBlur 등 다중 코어 활용)
+try:
+    cv2.setNumThreads(0)
+except Exception:
+    pass
+
+# Kornia GPU 가속: 기본 OFF (CPU↔GPU 전송 오버헤드로 다운샘플 구간에서는 오히려 느림).
+# 필요 시 환경변수 FOREIGNBODY_USE_BUBBLE_GPU=1 로 활성화.
+_KORNIA_AVAILABLE = False
+try:
+    import torch
+    import kornia as K
+    if os.environ.get("FOREIGNBODY_USE_BUBBLE_GPU", "").strip().lower() in ("1", "true", "yes"):
+        _KORNIA_AVAILABLE = torch.cuda.is_available()
+except Exception:
+    pass
+
 
 class BubbleDetectorParams:
     """Bubble 검출 파라미터.
@@ -95,9 +112,14 @@ class ForeignBodyDetector:
 
         _save("01_gray.png", gray)
 
+        # ─── 일반 검출용 다운샘플 (버블과 동일: 2배까지, 연산량 약 1/4) ───
+        h, w = gray.shape[:2]
+        reg_scale = 2 if min(h, w) > 512 else 1
+        work_gray = cv2.pyrDown(gray) if reg_scale == 2 else gray
+
         # ─── 1. 멀티스레드 병렬 처리를 위한 함수 분리 ───
         def run_regular():
-            blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+            blurred = cv2.GaussianBlur(work_gray, (3, 3), 0)
             _save("02_blurred.png", blurred)
 
             if use_adaptive:
@@ -116,14 +138,29 @@ class ForeignBodyDetector:
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ok_size, ok_size))
             opened = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
             _save("04_opened.png", opened)
-            
+
             ck_size = max(1, close_kernel)
             kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ck_size, ck_size))
             closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel_close, iterations=1)
             _save("05_closed.png", closed)
 
             cnts, _ = cv2.findContours(closed, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-            v_cnts = [cnt for cnt in cnts if cv2.contourArea(cnt) >= min_area]
+            # 다운샘플 시 면적은 scale^2배 작음 → work 기준 min_area
+            min_a = max(1, min_area // (reg_scale * reg_scale))
+            v_cnts = [cnt for cnt in cnts if cv2.contourArea(cnt) >= min_a]
+            # 원본 해상도로 좌표 복원
+            if reg_scale == 2:
+                v_cnts = [(cnt.astype(np.float32) * reg_scale).astype(np.int32) for cnt in v_cnts]
+                v_cnts = [c for c in v_cnts if cv2.contourArea(c) >= min_area]
+                blurred = cv2.pyrUp(blurred)
+                thresh = cv2.pyrUp(thresh)
+                opened = cv2.pyrUp(opened)
+                closed = cv2.pyrUp(closed)
+                if blurred.shape[0] != h or blurred.shape[1] != w:
+                    blurred = cv2.resize(blurred, (w, h), interpolation=cv2.INTER_LINEAR)
+                    thresh = cv2.resize(thresh, (w, h), interpolation=cv2.INTER_NEAREST)
+                    opened = cv2.resize(opened, (w, h), interpolation=cv2.INTER_NEAREST)
+                    closed = cv2.resize(closed, (w, h), interpolation=cv2.INTER_NEAREST)
             return v_cnts, closed, blurred, thresh, opened
 
         def run_bubble():
@@ -168,6 +205,7 @@ class ForeignBodyDetector:
                        stop_after: str | None = None) -> tuple[list, dict | None]:
         """Bubble 검출: Morph-Open 배경 평탄화 → 양극성 → DoG → MAD 임계 → 형상 필터.
 
+        큰 이미지(최소 변 512px 초과)는 2배 다운샘플 후 파이프라인 실행해 속도 개선.
         ROI가 없으면 전체 이미지에 대해 수행.
         stop_after: "clahe" / "diff_map" / "binary" / None(전체).
         """
@@ -177,19 +215,41 @@ class ForeignBodyDetector:
 
         h, w = gray.shape[:2]
         debug_imgs = {}
-        mask = np.ones((h, w), dtype=np.uint8) * 255
 
-        # ──── 1. Morphological Opening 배경 평탄화 ────
-        ksize = max(3, int(p.bg_open_ksize)) | 1
-        k_bg = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
-        bg = cv2.morphologyEx(gray, cv2.MORPH_OPEN, k_bg)
+        # ──── 0. 다운샘플링 (속도 최적화: 2배까지만, 검출 품질 유지) ────
+        scale = 1
+        work = gray
+        if min(h, w) > 512:
+            scale = 2
+            work = cv2.pyrDown(gray)
+        hw, ww = work.shape[:2]
+        mask = np.ones((hw, ww), dtype=np.uint8) * 255
+
+        # 다운샘플 시 커널/시그마를 스케일에 맞춤
+        kscale = scale
+        ksize = max(3, (max(3, int(p.bg_open_ksize)) | 1) // kscale) | 1
         smooth_sigma = float(getattr(p, "bg_smooth_sigma", 0))
         if smooth_sigma <= 0:
             smooth_sigma = ksize / 4.0
-        bg = cv2.GaussianBlur(bg, (0, 0), smooth_sigma)
+        else:
+            smooth_sigma = smooth_sigma / float(kscale)
 
-        flat_dark = cv2.subtract(bg, gray)
-        flat_bright = cv2.subtract(gray, bg)
+        # ──── 1. 배경 평탄화 (OpenCV 또는 Kornia GPU) ────
+        if _KORNIA_AVAILABLE:
+            work_t = torch.from_numpy(work).float().cuda().div(255.0).unsqueeze(0).unsqueeze(0)
+            kernel_np = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
+            kernel_t = torch.from_numpy(kernel_np).float().to(work_t.device)
+            bg_t = K.morphology.opening(work_t, kernel_t)
+            gk = int(2 * np.ceil(3 * smooth_sigma) + 1) | 1
+            bg_t = K.filters.gaussian_blur2d(bg_t, (gk, gk), (smooth_sigma, smooth_sigma))
+            bg = (bg_t.cpu().numpy().squeeze() * 255.0).clip(0, 255).astype(np.uint8)
+        else:
+            k_bg = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
+            bg = cv2.morphologyEx(work, cv2.MORPH_OPEN, k_bg)
+            bg = cv2.GaussianBlur(bg, (0, 0), smooth_sigma)
+
+        flat_dark = cv2.subtract(bg, work)
+        flat_bright = cv2.subtract(work, bg)
         flat = cv2.max(flat_dark, flat_bright)
 
         # ──── 2. (선택) CLAHE ────
@@ -199,13 +259,26 @@ class ForeignBodyDetector:
                 tileGridSize=(int(p.clahe_grid), int(p.clahe_grid)))
             flat = clahe.apply(flat)
 
-        debug_imgs["clahe"] = flat.copy()
+        if scale > 1:
+            up = flat
+            for _ in range(scale // 2):
+                up = cv2.pyrUp(up)
+            if up.shape[:2] != (h, w):
+                up = cv2.resize(up, (w, h), interpolation=cv2.INTER_LINEAR)
+            debug_imgs["clahe"] = up
+        else:
+            debug_imgs["clahe"] = flat.copy()
         if stop_after == "clahe":
             return [], debug_imgs
 
-        # ──── 3. 노이즈 제거 ────
+        # ──── 3. 노이즈 제거 (OpenCV 또는 Kornia GPU) ────
         dm = getattr(p, "denoise_mode", "median") or "median"
-        if dm == "median":
+        if _KORNIA_AVAILABLE and dm == "median":
+            ks = max(3, int(p.median_ksize)) | 1
+            flat_t = torch.from_numpy(flat).float().cuda().div(255.0).unsqueeze(0).unsqueeze(0)
+            den_t = K.filters.median_blur(flat_t, (ks, ks))
+            den = (den_t.cpu().numpy().squeeze() * 255.0).clip(0, 255).astype(np.uint8)
+        elif dm == "median":
             ks = max(3, int(p.median_ksize)) | 1
             den = cv2.medianBlur(flat, ks)
         elif dm == "bilateral":
@@ -216,26 +289,40 @@ class ForeignBodyDetector:
         else:
             den = flat
 
-        # ──── 4. DoG 밴드패스 (abs) 멀티스레드 병렬 실행 ────
-        den_f = den.astype(np.float32) / 255.0
+        # ──── 4. DoG 밴드패스 (OpenCV 또는 Kornia GPU) ────
         s1, s2 = float(p.sigma_small), float(p.sigma_large)
-        
-        def _calc_g1():
-            return cv2.GaussianBlur(den_f, (0, 0), s1)
-            
-        def _calc_g2():
-            return cv2.GaussianBlur(den_f, (0, 0), s2)
-            
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            fut_g1 = executor.submit(_calc_g1)
-            fut_g2 = executor.submit(_calc_g2)
-            g1 = fut_g1.result()
-            g2 = fut_g2.result()
-            
-        dog_abs = np.abs(g1 - g2)
+        if scale > 1:
+            s1, s2 = s1 / kscale, s2 / kscale
+        if _KORNIA_AVAILABLE:
+            den_t = torch.from_numpy(den.astype(np.float32) / 255.0).float().cuda().unsqueeze(0).unsqueeze(0)
+            k1 = int(2 * np.ceil(3 * s1) + 1) | 1
+            k2 = int(2 * np.ceil(3 * s2) + 1) | 1
+            g1_t = K.filters.gaussian_blur2d(den_t, (k1, k1), (s1, s1))
+            g2_t = K.filters.gaussian_blur2d(den_t, (k2, k2), (s2, s2))
+            dog_abs = (g1_t - g2_t).abs().cpu().numpy().squeeze()
+        else:
+            den_f = den.astype(np.float32) / 255.0
+            def _calc_g1():
+                return cv2.GaussianBlur(den_f, (0, 0), s1)
+            def _calc_g2():
+                return cv2.GaussianBlur(den_f, (0, 0), s2)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                fut_g1 = executor.submit(_calc_g1)
+                fut_g2 = executor.submit(_calc_g2)
+                g1 = fut_g1.result()
+                g2 = fut_g2.result()
+            dog_abs = np.abs(g1 - g2)
 
         diff_vis = np.clip(dog_abs * 255.0 * 10.0, 0, 255).astype(np.uint8)
-        debug_imgs["diff_map"] = diff_vis
+        if scale > 1:
+            up = diff_vis
+            for _ in range(scale // 2):
+                up = cv2.pyrUp(up)
+            if up.shape[:2] != (h, w):
+                up = cv2.resize(up, (w, h), interpolation=cv2.INTER_LINEAR)
+            debug_imgs["diff_map"] = up
+        else:
+            debug_imgs["diff_map"] = diff_vis
         if stop_after == "diff_map":
             return [], debug_imgs
 
@@ -257,14 +344,22 @@ class ForeignBodyDetector:
         k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ok, ok))
         cand = cv2.morphologyEx(cand, cv2.MORPH_CLOSE, k_close)
         cand = cv2.morphologyEx(cand, cv2.MORPH_OPEN, k_open)
-        debug_imgs["binary"] = cand
 
+        # 다운샘플 했으면 binary를 원본 해상도로 복원 후 findContours (좌표가 원본 기준)
+        if scale > 1:
+            cand_full = cand
+            for _ in range(scale // 2):
+                cand_full = cv2.pyrUp(cand_full)
+            if cand_full.shape[0] != h or cand_full.shape[1] != w:
+                cand_full = cv2.resize(cand_full, (w, h), interpolation=cv2.INTER_NEAREST)
+            cand = cand_full
+        debug_imgs["binary"] = cand.copy()
         if stop_after == "binary":
             return [], debug_imgs
 
-        # ──── 7. 컨투어 + 형상 필터 ────
+        # ──── 7. 컨투어 + 형상 필터 (원본 픽셀 좌표). SIMPLE로 포인트 수 감소 → 속도/메모리 절약 ────
         contours, _ = cv2.findContours(cand, cv2.RETR_EXTERNAL,
-                                       cv2.CHAIN_APPROX_NONE)
+                                       cv2.CHAIN_APPROX_SIMPLE)
 
         min_r = max(1, int(p.min_diameter)) / 2.0
         max_r = max(min_r + 1, int(p.max_diameter)) / 2.0

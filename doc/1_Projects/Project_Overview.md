@@ -14,14 +14,14 @@
 ### 1. 주요 폴더 구성 (src/)
 * **`core/` (비전 검사 알고리즘 및 딥러닝 엔진)**
   * `detection.py`: OpenCV 기반 전통적인 룰 기반(Rule-based) 이물/기포 탐지 알고리즘. (파라미터 조절 가능)
-  * `classification.py`: PyTorch 기반 이미지 분류(Classification) 모델 (ResNet, EfficientNet 등을 활용한 양품/불량 분류).
+  * `classification.py`: PyTorch/ONNX 기반 이미지 분류(Classification) 모델 (EfficientNet-B0 활용, Rule-based 분류와 병행).
   * `yolo_detector.py` / `yolo_dataset.py`: YOLO를 활용한 딥러닝 기반 객체 탐지 알고리즘 연동 및 데이터 처리.
 * **`hardware/` (카메라 및 장비 연동)**
   * `camera_interface.py`: 카메라 연결 추상화 클래스
   * `basler_camera.py`: Basler 산업용 카메라 제어 및 실시간 영상 취득
-  * `file_camera.py`: 카메라가 없는 환경에서도 저장된 이미지 폴더를 읽어와 카메라처럼 시뮬레이션할 수 있는 파일 기반 가상 카메라
+  * `file_camera.py`: 카메라가 없는 환경에서도 저장된 이미지/동영상 파일을 읽어와 카메라처럼 시뮬레이션할 수 있는 파일 기반 가상 카메라
 * **`ui/` (사용자 인터페이스 (PyQt6 기반))**
-  * `main_window.py`: 실시간 검사 결과 및 카메라 뷰를 확인할 수 있는 메인 대시보드 화면
+  * `main_window.py`: 실시간 검사 결과 및 카메라 뷰를 확인할 수 있는 메인 대시보드. User / Maker / Viewer 모드 지원 (Viewer 시 좌측 Debug/Defect 패널 접기, Main View 확대)
   * `rule_params_dialog.py`: 룰 기반 이미지 프로세싱(전처리, 이진화 기준 등) 파라미터를 실시간으로 튜닝할 수 있는 대화상자
   * `classification_tab.py` / `yolo_annotation_tab.py`: 딥러닝 모델 학습을 위한 데이터 라벨링 및 학습 관리 탭
   * `basler_settings_dialog.py`: Basler 카메라 노출 시간, Gain 등을 설정

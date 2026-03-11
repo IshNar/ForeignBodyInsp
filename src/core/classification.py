@@ -76,52 +76,45 @@ class RuleBasedClassifier:
             aspect_ratio = float(w) / h if h != 0 else 0
 
             label = "Unknown"
-            
+
             if gray is None:
                 label = "Particle"
             else:
                 x, y, w, h = cv2.boundingRect(contour)
-                # Fast ROI without drawing masks for contrast calculation
-                # Use a larger bounding box to sample background
                 pad = 3
                 x1, y1 = max(0, x - pad), max(0, y - pad)
                 x2, y2 = min(img_w, x + w + pad), min(img_h, y + h + pad)
-                
-                # Core vs Periphery estimation (much faster than drawing mask for every particle)
+
                 roi = gray[y1:y2, x1:x2]
                 if roi.size > 0:
-                    # Simple heuristic: compare center vs border intensities
                     rh, rw = roi.shape
-                    
+
                     if rh > pad*2 and rw > pad*2:
                         center_roi = roi[pad:rh-pad, pad:rw-pad]
                         fg_mean = np.mean(center_roi)
-                        
-                        # Full mean
+
                         full_mean = np.mean(roi)
-                        
-                        # Approximate background by taking difference
-                        # (Sum_full - Sum_center) / (Area_full - Area_center)
+
                         sum_full = full_mean * roi.size
                         sum_center = fg_mean * center_roi.size
                         bg_pts = roi.size - center_roi.size
-                        
+
                         bg_mean = (sum_full - sum_center) / bg_pts if bg_pts > 0 else fg_mean
-                        
+
                         contrast = abs(fg_mean - bg_mean)
                         label = "Noise_Dust" if contrast < self.noise_contrast_threshold else "Particle"
                     else:
-                        label = "Particle" # Too small to check contrast
+                        label = "Particle"
                 else:
                     label = "Particle"
-                    
+
             results.append({
                 "label": label,
                 "area": area,
                 "circularity": circularity,
                 "aspect_ratio": aspect_ratio,
             })
-            
+
         return results
 
 

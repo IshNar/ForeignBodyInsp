@@ -510,6 +510,21 @@
 
 ---
 
+### 🕐 (오늘) — [버그 해결] Viewer 모드 전환 시 하단 밀림(StatusBar 잘림)
+
+**파일**: `src/ui/main_window.py`, `VIEWER_MODE_LAYOUT_TROUBLESHOOTING.md`
+
+**증상**: 최대화 상태에서 Viewer ON → OFF 시 전체 UI가 아래로 밀려 StatusBar가 잘려 보임. Maker 모드 전환에서는 재현 안 됨.
+
+**한 일**:
+- 좌측 패널 `setVisible(False/True)` 제거 → 스플리터 `setSizes([0, ...])` / 저장값 복원으로만 접기·복원
+- `splitter.setCollapsible(0, True)` 추가
+- 중앙/우측 패널 `setMinimumHeight(0)` 및 세로 SizePolicy `Expanding`으로 최소 높이 전파 차단
+- init 시점 pre-warm 제거 → `showEvent` 이후 1회 `_post_show_layout_warmup()` 실행으로 sizeHint 안정화
+- 트러블슈팅 문서 `VIEWER_MODE_LAYOUT_TROUBLESHOOTING.md` 작성 (시도 목록·원인·최종 해결·mermaid 포함)
+
+---
+
 ## 📊 주요 기능 요약 (최신)
 
 | 카테고리 | 기능 |
