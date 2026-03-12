@@ -418,6 +418,35 @@
 - **"Video Record" 체크박스** 추가
 - 체크 후 Start Inspection → 녹화 시작, Stop → 녹화 종료
 - "Basler Video File" 폴더에 `YYYYMMDD_HHMMSS.avi`로 저장
+
+---
+
+## 📅 2026-03-12 (수) — OpenVINO 장치 상태 표시 개선 및 동작 안정화
+
+### [기능 개선 - Main 창 Classification 디바이스 표시]
+
+**상황**: Level5(OpenVINO) 선택 시 UI에 ONNX/CPU만 표시되고, OpenVINO DEVICE(CPU/GPU/NPU) 식별이 불명확.
+
+**한 일**:
+- `src/core/classification.py` `DeepLearningClassifier`:
+  - `get_device_simple()` 추가 (CPU/GPU/NPU/AUTO/—)
+  - `get_device_display()`에서 OpenVINO 상태를 정확하게 보여주도록 개선
+  - `_infer_openvino_actual_device()`로 OPENVINO AUTO 대기기 추론
+  - 실패된 OpenVINO 로드 시 `_clear_openvino_session()`로 상태 정리
+- `src/ui/main_window.py`:
+  - `lbl_dl_device` 표시 업데이트 로직 통합 (`_update_dl_device_label()`)
+  - 모델 로드/Auto DL 토글/RuleParams OK 이후에도 상태 재갱신
+- 결과: "OpenVINO (GPU)"/"OpenVINO (NPU)"/"OpenVINO (CPU)"으로 표시되며, 실패 시 "CPU (ONNX)"로 자동 폴백됨.
+
+### [버그 수정 - OpenVINO Level5 실패 시 폴백 명시]
+
+**한 일**:
+- Level5에서 OpenVINO EP 로드 불가 시 Level4로 다운그레이드
+- UI가 즉시 반영되도록 `lbl_dl_device` 스타일/텍스트 갱신
+- 설정 로드 이후에도 디바이스 텍스트 일관성 확보
+
+---
+
 - 실시간 프레임을 VideoWriter로 기록
 
 ---

@@ -131,6 +131,7 @@ class DeepLearningClassifier:
         self._compiled = False
         self._ort_session_openvino = None
         self._openvino_device = "AUTO"
+        self._openvino_device_actual = None
         if model_path and os.path.isfile(model_path):
             self.load_model(model_path)
 
@@ -141,13 +142,42 @@ class DeepLearningClassifier:
         """추론에 사용 중인 디바이스. 'cuda' 또는 'cpu'."""
         return getattr(self, "_device", "cpu")
 
+    def _infer_openvino_actual_device(self) -> str | None:
+        """OpenVINO AUTO 모드에서 실제 사용 가능한 장치를 유추."""
+        try:
+            from openvino.runtime import Core
+            core = Core()
+            devices = [d.upper() for d in core.available_devices]
+            # 우선 순위: GPU > NPU > CPU
+            for keyword, drv in [("GPU", "GPU"), ("NPU", "NPU"), ("MYRIAD", "NPU"), ("CPU", "CPU")]:
+                for d in devices:
+                    if keyword in d:
+                        return drv
+        except Exception:
+            pass
+        return None
+
+    def get_device_simple(self) -> str:
+        """UI 표시용 간단한 디바이스 이름: CPU/GPU/NPU/AUTO/—."""
+        if not self.is_loaded():
+            return "—"
+        if getattr(self, "_ort_session_openvino", None) is not None:
+            dev = getattr(self, "_openvino_device", "AUTO")
+            if dev == "AUTO":
+                inferred = getattr(self, "_openvino_device_actual", None) or self._infer_openvino_actual_device()
+                return inferred or "AUTO"
+            return dev
+        if self.ort_session is not None:
+            return "GPU" if self._device == "cuda" else "CPU"
+        return "GPU" if self._device == "cuda" else "CPU"
+
     def get_device_display(self) -> str:
         """UI 표시용: GPU/NPU 사용 여부 및 백엔드."""
         if not self.is_loaded():
             return "—"
         if getattr(self, "_ort_session_openvino", None) is not None:
-            dev = getattr(self, "_openvino_device", "AUTO")
-            return f"OpenVINO ({dev})"
+            dev = self.get_device_simple()
+            return f"{dev} (OpenVINO)" if dev not in ("—", "AUTO") else "OpenVINO (AUTO)"
         dev = self.get_device()
         if self.ort_session is not None:
             return "GPU (ONNX)" if dev == "cuda" else "CPU (ONNX)"
@@ -194,6 +224,7 @@ class DeepLearningClassifier:
     def _clear_openvino_session(self):
         """OpenVINO EP 세션 해제."""
         self._ort_session_openvino = None
+        self._openvino_device_actual = None
 
     def get_openvino_device(self) -> str:
         """Level 5일 때 OpenVINO 장치 (CPU / GPU / NPU / AUTO)."""
@@ -234,7 +265,12 @@ class DeepLearningClassifier:
             dummy = np.zeros((1, 3, 224, 224), dtype=np.float32)
             inp_name = self._ort_session_openvino.get_inputs()[0].name
             self._ort_session_openvino.run(None, {inp_name: dummy})
-            print(f"[DL Classifier] OpenVINO EP 로드 완료 (device={device})")
+            if device == "AUTO":
+                auto_resolved = self._infer_openvino_actual_device() or "AUTO"
+                self._openvino_device_actual = auto_resolved
+            else:
+                self._openvino_device_actual = device
+            print(f"[DL Classifier] OpenVINO EP 로드 완료 (device={device}, resolved={self._openvino_device_actual})")
         except Exception as e:
             print(f"[DL Classifier] OpenVINO EP 로드 실패 (Level 4로 폴백): {e}")
             self._optimization_level = 4

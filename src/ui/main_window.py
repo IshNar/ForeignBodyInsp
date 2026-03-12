@@ -1695,17 +1695,37 @@ class MainWindow(QMainWindow):
     def _on_use_dl_toggled(self, checked):
         """Use Classification 체크박스 토글."""
         self.classifier.set_use_deep_learning(checked)
-        if hasattr(self, "lbl_dl_device"):
-            disp = self.classifier.dl_classifier.get_device_display()
-            self.lbl_dl_device.setText(disp)
-            self.lbl_dl_device.setStyleSheet(
-                "color: #0a0; font-size: 11px;" if "GPU" in disp else "color: #666; font-size: 11px;"
-            )
+        self._update_dl_device_label()
         if checked and not self.classifier.dl_classifier.is_loaded():
             QMessageBox.information(self, "알림",
                 "딥러닝 모델이 로드되지 않았습니다.\n"
                 "'모델 로드' 버튼으로 학습된 모델(.onnx 또는 .pth)을 로드하세요.\n"
                 "모델이 로드될 때까지 RuleBased 분류를 사용합니다.")
+
+    def _update_dl_device_label(self):
+        """Deep Learning 장치 상태를 메인 창에 표시."""
+        if not hasattr(self, "lbl_dl_device"):
+            return
+        cls = self.classifier.dl_classifier
+        short = cls.get_device_simple()
+        if short == "—":
+            self.lbl_dl_device.setText("—")
+            self.lbl_dl_device.setStyleSheet("color: #666; font-size: 11px;")
+            return
+
+        if getattr(cls, "_ort_session_openvino", None) is not None:
+            self.lbl_dl_device.setText(short)
+        elif cls.ort_session is not None:
+            self.lbl_dl_device.setText(f"{short} (ONNX)")
+        elif cls.model is not None:
+            self.lbl_dl_device.setText(f"{short} (PyTorch)")
+        else:
+            self.lbl_dl_device.setText(short)
+
+        if short in ("GPU", "NPU"):
+            self.lbl_dl_device.setStyleSheet("color: #0a0; font-size: 11px;")
+        else:
+            self.lbl_dl_device.setStyleSheet("color: #666; font-size: 11px;")
 
     def _app_root(self):
         """exe일 때 exe 폴더, 아니면 프로젝트 루트 (모델/설정 파일 기준 경로)."""
@@ -1827,6 +1847,7 @@ class MainWindow(QMainWindow):
                 dl_data.get("optimization_level", 0))
             self.classifier.dl_classifier.set_openvino_device(
                 dl_data.get("openvino_device", "AUTO"))
+            self._update_dl_device_label()
             print(f"[MainWindow] 설정 로드 완료: {path}")
         except Exception as e:
             print(f"[MainWindow] 설정 로드 실패: {path} — {e}")
@@ -1905,6 +1926,7 @@ class MainWindow(QMainWindow):
             self.bubble_show_text = gen["bubble_show_text"]
             # 확인 시 rule_params.json에 저장 (재실행 시 복원)
             self._save_settings()
+            self._update_dl_device_label()
             # (선택) 설정 변경 즉시 재검사 하려면 주석 해제 (단, 정지 상태에서만)
             if not self.timer.isActive() and current_frame is not None:
                 self.update_frame()
@@ -1914,12 +1936,8 @@ class MainWindow(QMainWindow):
         ok, err = self.classifier.load_dl_model(fname)
         if ok:
             labels = self.classifier.dl_classifier.labels
+            self._update_dl_device_label()
             disp = self.classifier.dl_classifier.get_device_display()
-            if hasattr(self, "lbl_dl_device"):
-                self.lbl_dl_device.setText(disp)
-                self.lbl_dl_device.setStyleSheet(
-                    "color: #0a0; font-size: 11px;" if "GPU" in disp else "color: #666; font-size: 11px;"
-                )
             QMessageBox.information(self, "모델 로드 완료",
                 f"모델이 로드되었습니다.\n클래스: {', '.join(labels)}\n추론: {disp}")
         else:
