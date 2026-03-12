@@ -1,0 +1,4 @@
+# Level 5 (OpenVINO EP) 사용 시 추가 설치
+# pip install onnxruntime-openvino
+# 주: onnxruntime-gpu와 동시 설치 시 충돌 가능. Intel 전용 PC에서는 onnxruntime-openvino만 사용 권장.
+onnxruntime-openvino

@@ -307,3 +307,29 @@ PRESERVE_ITEMS = [
 - **Windows Vista 이후** UIPI가 도입됨
 - Linux/macOS에서는 이 문제가 발생하지 않음
 
+---
+
+## 2026-02-05 — Classification 사용 시 검사 시간 변동·메모리 이슈
+
+| 항목 | 내용 |
+|:---|:---|
+| **발생일** | 2026-02-05 |
+| **심각도** | 🟡 Medium |
+| **상태** | ✅ 완화됨 |
+| **영향 범위** | Classification(ONNX) 사용 + 동영상 재생 검사 |
+
+**무슨 문제**:
+- 동영상 틀어놓고 반복 검사 시 사이클마다 검사 시간이 미세하게 늘어나는 것처럼 보임.
+- Classification 사용 시 180ms~390ms까지 시간 편차가 큼(같은 동영상, 다른 프레임). 영상 멈추면 상대적으로 안정.
+
+**원인**:
+- **메모리**: DetectionWorker가 프레임 버퍼를 해제하지 않음, 매 프레임 `ThreadPoolExecutor` 재생성, 결과 처리 시 프레임 `.copy()` 과다 → GC·할당 부담 증가.
+- **시간 변동**: 추론 도중 Python GC 실행으로 간헐적 스파이크; ONNX CUDA workspace 첫 사용 시 할당 지연; ROI 추출 시 매 청크 대용량 배열 할당.
+
+**해결**:
+- Worker `run()` 끝에서 `_frame_bgr`/`_full_frame_bgr` 해제, 검출용 ThreadPoolExecutor 1개 캐싱, 결과 처리 시 불필요한 `.copy()` 제거(참조 공유).
+- ONNX 로드 후 warmup 1회, CPU pipeline 구간에서 `gc.disable()`/`gc.enable()` 구간 격리, 50프레임마다 `gc.collect()`+`torch.cuda.empty_cache()`.
+- ROI 버퍼 풀 2개 도입, `_extract_rois_chunk(..., out=)`로 유효 ROI만 앞쪽에 채워 재사용.
+
+**수정 파일**: `src/core/classification.py`, `src/ui/main_window.py`
+

@@ -80,6 +80,9 @@ class DetectionWorker(QThread):
             import traceback
             traceback.print_exc()
             self.result_ready.emit([], None, None, None, None, self._full_frame_bgr, {})
+        finally:
+            self._frame_bgr = None
+            self._full_frame_bgr = None
 
     def _run_threshold(self, frame):
         """기존 Threshold+분류 파이프라인 (최적화 + 프로파일링)."""
@@ -128,11 +131,12 @@ class DetectionWorker(QThread):
                 return [], None
             return detector.detect_bubbles(gray)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            fut_gen = ex.submit(run_general)
-            fut_bub = ex.submit(run_bubble_only)
-            valid_contours, closed = fut_gen.result()
-            bubble_contours, bubble_debug = fut_bub.result()
+        if not hasattr(self, '_detect_pool'):
+            self._detect_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        fut_gen = self._detect_pool.submit(run_general)
+        fut_bub = self._detect_pool.submit(run_bubble_only)
+        valid_contours, closed = fut_gen.result()
+        bubble_contours, bubble_debug = fut_bub.result()
 
         if not getattr(self, "_general_enabled", True):
             detector.last_debug = {"gray": gray}
@@ -334,7 +338,7 @@ class MainWindow(QMainWindow):
         # === 메뉴 ===
         menubar = self.menuBar()
         menu_settings = menubar.addMenu("설정")
-        act_rule_params = QAction("RuleBase 파라미터...", self)
+        act_rule_params = QAction("검사 파라미터 설정", self)
         act_rule_params.triggered.connect(self._open_rule_params_dialog)
         menu_settings.addAction(act_rule_params)
         menu_help = menubar.addMenu("도움말")
@@ -900,6 +904,11 @@ class MainWindow(QMainWindow):
                     self.chk_adaptive.blockSignals(False)
                 self.lbl_thresh_value.setText(str(self.slider_thresh.value()))
                 self.lbl_area_value.setText(str(self.slider_area.value()))
+                dl_data = data.get("deep_learning", {})
+                self.classifier.dl_classifier.set_optimization_level(
+                    dl_data.get("optimization_level", 0))
+                self.classifier.dl_classifier.set_openvino_device(
+                    dl_data.get("openvino_device", "AUTO"))
             except Exception as e:
                 print(f"[MainWindow] init_ui 설정 로드 실패: {_rule_params_path} — {e}")
         # exe 실행 시 exe 폴더에 classification_model.onnx 있으면 자동 로드
@@ -1416,22 +1425,20 @@ class MainWindow(QMainWindow):
 
             # --- 프레임 및 contour 준비 ---
             if self._last_roi_offset is not None and full_frame is not None:
-                # ROI 검사: contour 좌표를 ROI→전체 이미지 좌표로 오프셋
                 rx, ry = self._last_roi_offset
                 if contours:
                     contours = [(cnt + np.array([[[rx, ry]]])).astype(np.int32) for cnt in contours]
+                self.original_frame_full = full_frame.copy()
+                self._display_frame_clean = self.original_frame_full
                 display_frame = full_frame.copy()
                 display_base_frame = full_frame.copy()
-                self.original_frame_full = full_frame.copy()
-                self._display_frame_clean = full_frame.copy()
-                self.current_gray = cv2.cvtColor(full_frame, cv2.COLOR_BGR2GRAY) if len(full_frame.shape) == 3 else full_frame
+                self.current_gray = cv2.cvtColor(self.original_frame_full, cv2.COLOR_BGR2GRAY) if len(full_frame.shape) == 3 else full_frame
             elif raw_frame is not None:
-                # 일반 검사 (ROI 없음)
+                self.original_frame_full = raw_frame.copy()
+                self._display_frame_clean = self.original_frame_full
                 display_frame = display_frame if display_frame is not None else raw_frame.copy()
                 display_base_frame = display_base_frame if display_base_frame is not None else raw_frame.copy()
-                self.original_frame_full = raw_frame.copy()
-                self._display_frame_clean = raw_frame.copy()
-                self.current_gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY) if len(raw_frame.shape) == 3 else raw_frame
+                self.current_gray = cv2.cvtColor(self.original_frame_full, cv2.COLOR_BGR2GRAY) if len(raw_frame.shape) == 3 else raw_frame
             else:
                 # 프레임 없음 — 기존 프레임 유지
                 if (self.view_cx is None or self.view_cy is None) and self.current_display_frame is not None:
@@ -1556,7 +1563,7 @@ class MainWindow(QMainWindow):
 
             # --- 상태 업데이트 ---
             self.current_contours = contours
-            self.current_frame_bgr = self.original_frame_full.copy() if self.original_frame_full is not None else None
+            self.current_frame_bgr = self.original_frame_full
             self.current_display_frame = display_frame
             self.display_base_frame = display_base_frame
 
@@ -1815,6 +1822,11 @@ class MainWindow(QMainWindow):
             # 라벨은 시그널 차단으로 갱신 안 됐을 수 있음
             self.lbl_thresh_value.setText(str(self.slider_thresh.value()))
             self.lbl_area_value.setText(str(self.slider_area.value()))
+            dl_data = data.get("deep_learning", {})
+            self.classifier.dl_classifier.set_optimization_level(
+                dl_data.get("optimization_level", 0))
+            self.classifier.dl_classifier.set_openvino_device(
+                dl_data.get("openvino_device", "AUTO"))
             print(f"[MainWindow] 설정 로드 완료: {path}")
         except Exception as e:
             print(f"[MainWindow] 설정 로드 실패: {path} — {e}")
@@ -1835,7 +1847,11 @@ class MainWindow(QMainWindow):
                 "classification_enabled": getattr(self, "classification_enabled", True),
                 "bubble_show_text": getattr(self, "bubble_show_text", True),
             },
-            "bubble_detection": self.detector.bubble_params.get_params()
+            "bubble_detection": self.detector.bubble_params.get_params(),
+            "deep_learning": {
+                "optimization_level": self.classifier.dl_classifier.get_optimization_level(),
+                "openvino_device": self.classifier.dl_classifier.get_openvino_device(),
+            },
         }
         try:
             path = os.path.join(self._app_root(), "rule_params.json")
@@ -1863,6 +1879,7 @@ class MainWindow(QMainWindow):
             self, self.classifier.rule_based, self._app_root(),
             bubble_params=self.detector.bubble_params,
             source_frame=current_frame,
+            dl_classifier=self.classifier.dl_classifier,
         )
         
         # UI 동기화

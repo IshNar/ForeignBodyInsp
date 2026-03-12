@@ -125,8 +125,12 @@ class DeepLearningClassifier:
         self.model = None
         self.ort_session = None
         self.model_path = model_path
-        self.labels = []  # 학습 시 사용된 라벨 목록
+        self.labels = []
         self._device = "cpu"
+        self._optimization_level = 0
+        self._compiled = False
+        self._ort_session_openvino = None
+        self._openvino_device = "AUTO"
         if model_path and os.path.isfile(model_path):
             self.load_model(model_path)
 
@@ -138,13 +142,103 @@ class DeepLearningClassifier:
         return getattr(self, "_device", "cpu")
 
     def get_device_display(self) -> str:
-        """UI 표시용: GPU 사용 여부 및 백엔드."""
+        """UI 표시용: GPU/NPU 사용 여부 및 백엔드."""
         if not self.is_loaded():
             return "—"
+        if getattr(self, "_ort_session_openvino", None) is not None:
+            dev = getattr(self, "_openvino_device", "AUTO")
+            return f"OpenVINO ({dev})"
         dev = self.get_device()
         if self.ort_session is not None:
             return "GPU (ONNX)" if dev == "cuda" else "CPU (ONNX)"
         return "GPU (PyTorch)" if dev == "cuda" else "CPU (PyTorch)"
+
+    def get_optimization_level(self) -> int:
+        return self._optimization_level
+
+    def set_optimization_level(self, level: int):
+        """최적화 수준 설정 (0~5). Level 2+ torch.compile, Level 5 OpenVINO EP(CPU/GPU/NPU/AUTO)."""
+        old = self._optimization_level
+        self._optimization_level = min(max(0, int(level)), 5)
+
+        if self._optimization_level == 5:
+            self._ensure_openvino_session()
+        else:
+            self._clear_openvino_session()
+            if self._optimization_level >= 2 and not self._compiled and self.model is not None and self._device == "cuda":
+                try:
+                    self.model = torch.compile(self.model, mode="reduce-overhead")
+                    self._compiled = True
+                    print(f"[DL Classifier] torch.compile 적용 (level={self._optimization_level})")
+                except Exception as e:
+                    print(f"[DL Classifier] torch.compile 실패 (무시): {e}")
+
+        if self._optimization_level < 2 and self._compiled:
+            try:
+                if hasattr(self.model, '_orig_mod'):
+                    self.model = self.model._orig_mod
+                    self._compiled = False
+                    print("[DL Classifier] torch.compile 해제")
+            except Exception:
+                pass
+
+        if old != self._optimization_level:
+            backend = "ONNX" if self.ort_session is not None else "PyTorch"
+            if getattr(self, "_ort_session_openvino", None) is not None:
+                dev = getattr(self, "_openvino_device", "AUTO")
+                print(f"[DL Classifier] level: {old}→{self._optimization_level}, backend: OpenVINO ({dev})")
+            else:
+                cuda_str = "CUDA" if self._device == "cuda" else "CPU-only"
+                print(f"[DL Classifier] level: {old}→{self._optimization_level}, backend: {backend}, {cuda_str}")
+
+    def _clear_openvino_session(self):
+        """OpenVINO EP 세션 해제."""
+        self._ort_session_openvino = None
+
+    def get_openvino_device(self) -> str:
+        """Level 5일 때 OpenVINO 장치 (CPU / GPU / NPU / AUTO)."""
+        return getattr(self, "_openvino_device", "AUTO")
+
+    def set_openvino_device(self, device: str):
+        """Level 5일 때 사용할 OpenVINO 장치. CPU / GPU / NPU / AUTO."""
+        allowed = ("CPU", "GPU", "NPU", "AUTO")
+        self._openvino_device = device if device in allowed else "AUTO"
+        if self._optimization_level == 5:
+            self._ensure_openvino_session()
+
+    def _ensure_openvino_session(self):
+        """Level 5 선택 시 ONNX Runtime + OpenVINO EP 세션 생성. 실패 시 Level 4로 폴백."""
+        self._clear_openvino_session()
+        if not getattr(self, "model_path", None) or not str(self.model_path).endswith(".onnx"):
+            print("[DL Classifier] Level 5(OpenVINO)는 ONNX 모델에서만 사용 가능. 현재 PyTorch 모델 로드됨.")
+            self._optimization_level = 4
+            return
+        if self.ort_session is None:
+            return
+        device = getattr(self, "_openvino_device", "AUTO")
+        try:
+            import onnxruntime as ort
+            opts = {"device_type": device}
+            try:
+                self._ort_session_openvino = ort.InferenceSession(
+                    self.model_path,
+                    sess_options=ort.SessionOptions(),
+                    providers=[("OpenVINOExecutionProvider", opts)],
+                )
+            except (ValueError, TypeError) as e:
+                if "OpenVINOExecutionProvider" in str(e) or "Provider" in str(e):
+                    print("[DL Classifier] OpenVINO EP를 사용하려면: pip install onnxruntime-openvino")
+                    self._optimization_level = 4
+                    return
+                raise
+            dummy = np.zeros((1, 3, 224, 224), dtype=np.float32)
+            inp_name = self._ort_session_openvino.get_inputs()[0].name
+            self._ort_session_openvino.run(None, {inp_name: dummy})
+            print(f"[DL Classifier] OpenVINO EP 로드 완료 (device={device})")
+        except Exception as e:
+            print(f"[DL Classifier] OpenVINO EP 로드 실패 (Level 4로 폴백): {e}")
+            self._optimization_level = 4
+            self._clear_openvino_session()
 
     def load_model(self, model_path: str):
         """저장된 모델 로드. 반환: (성공 여부, 실패 시 오류 메시지)."""
@@ -177,11 +271,27 @@ class DeepLearningClassifier:
                 else:
                     self.labels = ["Bubble", "Noise_Dust", "Particle", "Unknown"]
 
-                self.model = None # PyTorch 모델은 사용 안 함
+                self.model = None
+                self._clear_openvino_session()
                 active_providers = self.ort_session.get_providers()
                 self._device = "cuda" if "CUDAExecutionProvider" in active_providers else "cpu"
-                self._use_fp16 = False # ONNX 런타임 자체 최적화에 맡김
+                self._use_fp16 = False
                 self.model_path = path_abs
+                if self._optimization_level == 5:
+                    self._ensure_openvino_session()
+
+                # Warmup: CUDA 메모리 사전 할당 (첫 추론 지연 제거)
+                try:
+                    input_name = self.ort_session.get_inputs()[0].name
+                    input_shape = self.ort_session.get_inputs()[0].shape
+                    dummy_h = input_shape[2] if isinstance(input_shape[2], int) else 224
+                    dummy_w = input_shape[3] if isinstance(input_shape[3], int) else 224
+                    dummy = np.random.randn(1, 3, dummy_h, dummy_w).astype(np.float32)
+                    self.ort_session.run(None, {input_name: dummy})
+                    print(f"[DL Classifier] ONNX warmup 완료 (CUDA workspace 사전할당)")
+                except Exception:
+                    pass
+
                 print(f"[DL Classifier] ONNX 모델 로드 완료: {path_abs}, 클래스: {self.labels}, device: {active_providers[0]}")
                 return True, None
 
@@ -204,8 +314,18 @@ class DeepLearningClassifier:
                 self.model = self.model.half()
                 print(f"[DL Classifier] FP16 반정밀도 모드 활성화 (CUDA)")
             
+            self._compiled = False
             self.model_path = path_abs
             print(f"[DL Classifier] PyTorch 모델 로드 완료: {path_abs}, 클래스: {self.labels}, device: {self._device}")
+
+            if self._optimization_level >= 2 and self._device == "cuda":
+                try:
+                    self.model = torch.compile(self.model, mode="reduce-overhead")
+                    self._compiled = True
+                    print("[DL Classifier] torch.compile 적용 완료")
+                except Exception as e:
+                    print(f"[DL Classifier] torch.compile 실패 (무시): {e}")
+
             return True, None
         except Exception as e:
             err = str(e)
@@ -227,13 +347,33 @@ class DeepLearningClassifier:
     _MEAN_CHW = _MEAN.reshape(1, 3, 1, 1)
     _STD_CHW  = _STD.reshape(1, 3, 1, 1)
 
-    def _extract_rois_chunk(self, bboxes, frame_bgr, start, end, img_w, img_h, sz):
-        """CPU에서 ROI crop + resize + normalize를 수행하는 헬퍼 (파이프라인용)."""
-        chunk_size = end - start
-        # 결과 배열: (N, C, H, W) 형태로 직접 생성 (transpose 제거)
-        roi_chw = np.empty((chunk_size, 3, sz, sz), dtype=np.float32)
-        valid = np.zeros(chunk_size, dtype=bool)
+    # ROI 풀: 재사용 버퍼 2개 (스레드 2개와 번갈아 사용, 할당/GC 감소)
+    _ROI_CHUNK_MAX = 2048
 
+    def _get_roi_pool_buffers(self, chunk_size: int, sz: int):
+        """캐시된 [buf0, buf1] 반환. 각 (CHUNK_MAX, 3, sz, sz)."""
+        if not hasattr(self, "_roi_pool_buffers") or self._roi_pool_buffers is None:
+            self._roi_pool_buffers = [
+                np.empty((self._ROI_CHUNK_MAX, 3, sz, sz), dtype=np.float32),
+                np.empty((self._ROI_CHUNK_MAX, 3, sz, sz), dtype=np.float32),
+            ]
+        cap = self._roi_pool_buffers[0].shape[0]
+        if chunk_size > cap:
+            self._roi_pool_buffers = [
+                np.empty((max(chunk_size, self._ROI_CHUNK_MAX), 3, sz, sz), dtype=np.float32),
+                np.empty((max(chunk_size, self._ROI_CHUNK_MAX), 3, sz, sz), dtype=np.float32),
+            ]
+        return self._roi_pool_buffers
+
+    def _extract_rois_chunk(self, bboxes, frame_bgr, start, end, img_w, img_h, sz, out=None):
+        """CPU에서 ROI crop + resize + normalize. out이 있으면 유효 ROI만 앞쪽에 채움."""
+        chunk_size = end - start
+        if out is not None and out.shape[0] >= chunk_size:
+            roi_chw = out
+        else:
+            roi_chw = np.empty((chunk_size, 3, sz, sz), dtype=np.float32)
+
+        valid = np.zeros(chunk_size, dtype=bool)
         for j in range(chunk_size):
             i = start + j
             x, y, w, h = bboxes[i]
@@ -248,35 +388,169 @@ class DeepLearningClassifier:
             if roi.size == 0:
                 continue
 
-            # INTER_LINEAR: INTER_AREA보다 빠르고 차단율 좋음
-            resized = cv2.resize(roi, (sz, sz), interpolation=cv2.INTER_LINEAR)
-            # C레벨에서 uint8 -> float32 자동 형변환 및 대입 (루프 내부에서 numpy 배열 생성 비용 제거)
-            roi_chw[j] = resized[:, :, ::-1].transpose(2, 0, 1)
+            if roi.shape[0] == sz and roi.shape[1] == sz:
+                patch = roi
+            else:
+                patch = cv2.resize(roi, (sz, sz), interpolation=cv2.INTER_LINEAR)
+            roi_chw[j] = patch[:, :, ::-1].transpose(2, 0, 1)
             valid[j] = True
 
-        # valid만 뽑아서 일괄 normalize (Python for루프 바깥에서 C단위 벡터 연산)
         valid_indices = np.where(valid)[0]
-        if len(valid_indices) > 0:
+        n_valid = len(valid_indices)
+        if n_valid == 0:
+            return roi_chw, 0, valid_indices
+
+        if out is roi_chw:
+            # 유효 ROI만 앞쪽으로 밀어서 연속 구간으로 (풀 재사용 시)
+            for k, idx in enumerate(valid_indices):
+                if k != idx:
+                    roi_chw[k] = roi_chw[idx]
+            v = roi_chw[:n_valid]
+        else:
             v = roi_chw[valid_indices]
-            v /= 255.0
-            v -= self._MEAN_CHW
-            v /= self._STD_CHW
+
+        v /= 255.0
+        v -= self._MEAN_CHW
+        v /= self._STD_CHW
+        if out is roi_chw:
+            roi_chw[:n_valid] = v
+        else:
             roi_chw[valid_indices] = v
 
-        return roi_chw, valid, valid_indices
+        return roi_chw, n_valid, valid_indices
+
+    def _classify_gpu_crop(self, bboxes, frame_bgr, img_w, img_h, sz, use_fp16, n):
+        """PyTorch CUDA: 프레임 1장만 GPU 전송 → crop/resize/normalize GPU 처리.
+
+        optimization_level별 전략:
+          1-2: patches.append + torch.cat + softmax bypass
+          3:   배치 버퍼 사전할당 (torch.cat 제거)
+          4:   F.grid_sample (Python crop 루프 제거)
+        """
+        import torch.nn.functional as F
+        opt = self._optimization_level
+        dtype = torch.float16 if use_fp16 else torch.float32
+
+        if not hasattr(self, '_norm_cache'):
+            self._norm_cache = {}
+        cache_key = (str(self._device), dtype)
+        if cache_key not in self._norm_cache:
+            m = torch.tensor([0.485, 0.456, 0.406], device=self._device, dtype=dtype).view(1, 3, 1, 1)
+            s = torch.tensor([0.229, 0.224, 0.225], device=self._device, dtype=dtype).view(1, 3, 1, 1)
+            self._norm_cache[cache_key] = (m, s)
+        mean_gpu, std_gpu = self._norm_cache[cache_key]
+
+        frame_rgb = np.ascontiguousarray(frame_bgr[:, :, ::-1])
+        frame_gpu = torch.from_numpy(frame_rgb).to(self._device, non_blocking=True)
+        frame_gpu = frame_gpu.permute(2, 0, 1).unsqueeze(0).to(dtype=dtype)
+        frame_gpu.div_(255.0).sub_(mean_gpu).div_(std_gpu)
+
+        crop_coords = []
+        valid_indices = []
+        for i in range(n):
+            x, y, w, h = int(bboxes[i, 0]), int(bboxes[i, 1]), int(bboxes[i, 2]), int(bboxes[i, 3])
+            side = max(w * 2, h * 2, sz)
+            cx, cy = x + w // 2, y + h // 2
+            x1, y1 = max(0, cx - side // 2), max(0, cy - side // 2)
+            x2, y2 = min(img_w, x1 + side), min(img_h, y1 + side)
+            if x2 > x1 and y2 > y1:
+                crop_coords.append((y1, y2, x1, x2))
+                valid_indices.append(i)
+
+        all_conf = np.zeros(n, dtype=np.float32)
+        all_pred = np.zeros(n, dtype=np.int64)
+        valid_mask = np.zeros(n, dtype=bool)
+
+        if not valid_indices:
+            del frame_gpu
+            return all_conf, all_pred, valid_mask
+
+        MINI_BATCH = 128
+        for mb_start in range(0, len(valid_indices), MINI_BATCH):
+            mb_end = min(mb_start + MINI_BATCH, len(valid_indices))
+            mb_size = mb_end - mb_start
+            mb_crops = crop_coords[mb_start:mb_end]
+
+            if opt >= 4:
+                batch = self._grid_sample_crop(frame_gpu, mb_crops, img_h, img_w, sz, dtype)
+            elif opt >= 3:
+                batch = torch.empty(mb_size, 3, sz, sz, device=self._device, dtype=dtype)
+                for k, (y1, y2, x1, x2) in enumerate(mb_crops):
+                    patch = frame_gpu[:, :, y1:y2, x1:x2]
+                    if patch.shape[2] != sz or patch.shape[3] != sz:
+                        batch[k:k+1] = F.interpolate(patch, size=(sz, sz), mode='bilinear', align_corners=False)
+                    else:
+                        batch[k] = patch[0]
+            else:
+                patches = []
+                for y1, y2, x1, x2 in mb_crops:
+                    patch = frame_gpu[:, :, y1:y2, x1:x2]
+                    if patch.shape[2] != sz or patch.shape[3] != sz:
+                        patch = F.interpolate(patch, size=(sz, sz), mode='bilinear', align_corners=False)
+                    patches.append(patch)
+                batch = torch.cat(patches, dim=0)
+
+            out = self.model(batch)
+            pred_idx = out.argmax(dim=1)
+            max_logits = out.gather(1, pred_idx.unsqueeze(1))
+            exp_shifted = torch.exp(out.float() - max_logits.float())
+            conf = 1.0 / exp_shifted.sum(dim=1)
+            conf_np = conf.cpu().numpy()
+            pred_np = pred_idx.cpu().numpy()
+
+            for k in range(mb_size):
+                gi = valid_indices[mb_start + k]
+                all_conf[gi] = conf_np[k]
+                all_pred[gi] = pred_np[k]
+                valid_mask[gi] = True
+
+        del frame_gpu
+        return all_conf, all_pred, valid_mask
+
+    def _grid_sample_crop(self, frame_gpu, crop_coords, img_h, img_w, sz, dtype):
+        """Level 4: F.grid_sample로 모든 crop을 단일 GPU 연산으로 처리."""
+        import torch.nn.functional as F
+        n = len(crop_coords)
+        coords_t = torch.tensor(crop_coords, device=self._device, dtype=torch.float32)
+        y1s, y2s, x1s, x2s = coords_t[:, 0], coords_t[:, 1], coords_t[:, 2], coords_t[:, 3]
+
+        t = torch.linspace(0, 1, sz, device=self._device, dtype=torch.float32)
+        x_px = x1s.unsqueeze(1) + t.unsqueeze(0) * (x2s - x1s - 1).unsqueeze(1)
+        y_px = y1s.unsqueeze(1) + t.unsqueeze(0) * (y2s - y1s - 1).unsqueeze(1)
+
+        x_norm = 2.0 * x_px / max(img_w - 1, 1) - 1.0
+        y_norm = 2.0 * y_px / max(img_h - 1, 1) - 1.0
+
+        grid_x = x_norm.unsqueeze(1).expand(-1, sz, -1)
+        grid_y = y_norm.unsqueeze(2).expand(-1, -1, sz)
+        grid = torch.stack([grid_x, grid_y], dim=-1).to(dtype=dtype)
+
+        frame_expanded = frame_gpu.expand(n, -1, -1, -1)
+        return F.grid_sample(frame_expanded, grid, mode='bilinear',
+                             align_corners=True, padding_mode='zeros')
+
+    _gc_counter = 0
+    _GC_INTERVAL = 50
 
     def classify_batch(self, contours, frame_bgr=None):
         """
-        여러 contour를 한 번에 배치 추론 (10K+ contour 대응, CPU/GPU 파이프라인).
+        여러 contour를 한 번에 배치 추론 (10K+ contour 대응).
+        PyTorch+CUDA → GPU-side crop, ONNX/CPU → 기존 CPU 파이프라인.
         frame_bgr: 원본 BGR 이미지.
         Returns: list of dict (label, confidence, area, ...)
         """
         import time
-        from concurrent.futures import ThreadPoolExecutor
         t0 = time.perf_counter()
         n = len(contours)
         if n == 0:
             return []
+
+        DeepLearningClassifier._gc_counter += 1
+        if DeepLearningClassifier._gc_counter % self._GC_INTERVAL == 0:
+            import gc
+            gc.collect()
+            if self._device == "cuda":
+                torch.cuda.empty_cache()
 
         # 공통 정보 계산 (area 포함 bbox 한 번에 계산)
         rects = []
@@ -299,88 +573,100 @@ class DeepLearningClassifier:
             sz = CLASSIFICATION_INPUT_SIZE
             use_fp16 = getattr(self, '_use_fp16', False)
 
-            CHUNK = 2048  # 더 큰 청크 → 오버헤드 감소
-            MINI_BATCH = 128  # 속도를 위해 128 미니배치
-            all_conf = np.zeros(n, dtype=np.float32)
-            all_pred = np.zeros(n, dtype=np.int64)
-            valid_mask = np.zeros(n, dtype=bool)
+            opt = self._optimization_level
+            is_cuda = (self._device == "cuda")
+            # GPU crop: Level 1+ AND PyTorch + CUDA. ONNX는 항상 CPU pipeline (GPU→CPU 왕복 없음).
+            use_gpu_crop = (opt >= 1 and is_cuda and self.model is not None and self.ort_session is None)
 
-            # CPU/GPU 파이프라인 (작업 스레드를 2개 이상 주어 GPU 병목 완전 제거)
-            chunk_ranges = [(s, min(s + CHUNK, n)) for s in range(0, n, CHUNK)]
+            if use_gpu_crop:
+                with torch.inference_mode():
+                    all_conf, all_pred, valid_mask = self._classify_gpu_crop(
+                        bboxes, frame_bgr, img_w, img_h, sz, use_fp16, n)
+            else:
+                import gc
+                from concurrent.futures import ThreadPoolExecutor
+                CHUNK = 2048
+                MINI_BATCH = 128
+                all_conf = np.zeros(n, dtype=np.float32)
+                all_pred = np.zeros(n, dtype=np.int64)
+                valid_mask = np.zeros(n, dtype=bool)
 
-            with torch.inference_mode(), ThreadPoolExecutor(max_workers=2) as executor:
-                # 첫 번째 청크를 미리 준비
-                future = executor.submit(
-                    self._extract_rois_chunk, bboxes, frame_bgr,
-                    chunk_ranges[0][0], chunk_ranges[0][1], img_w, img_h, sz
-                )
+                chunk_ranges = [(s, min(s + CHUNK, n)) for s in range(0, n, CHUNK)]
+                pool = self._get_roi_pool_buffers(CHUNK, sz)
 
-                for ci, (chunk_start, chunk_end) in enumerate(chunk_ranges):
-                    # 현재 청크의 CPU 작업 결과 받기
-                    roi_chw, chunk_valid, valid_in_chunk = future.result()
-
-                    # 다음 청크의 CPU 작업을 비동기로 시작 (GPU 추론과 병렬)
-                    if ci + 1 < len(chunk_ranges):
-                        next_s, next_e = chunk_ranges[ci + 1]
+                gc_was_enabled = gc.isenabled()
+                gc.disable()
+                try:
+                    with ThreadPoolExecutor(max_workers=2) as executor:
+                        c0s, c0e = chunk_ranges[0][0], chunk_ranges[0][1]
                         future = executor.submit(
                             self._extract_rois_chunk, bboxes, frame_bgr,
-                            next_s, next_e, img_w, img_h, sz
+                            c0s, c0e, img_w, img_h, sz, out=pool[0]
                         )
 
-                    if len(valid_in_chunk) == 0:
-                        continue
+                        for ci, (chunk_start, chunk_end) in enumerate(chunk_ranges):
+                            roi_chw, n_valid, valid_in_chunk = future.result()
 
-                    # Tensor 변환 + GPU 전송
-                    valid_rois = roi_chw[valid_in_chunk]
+                            if ci + 1 < len(chunk_ranges):
+                                next_s, next_e = chunk_ranges[ci + 1]
+                                future = executor.submit(
+                                    self._extract_rois_chunk, bboxes, frame_bgr,
+                                    next_s, next_e, img_w, img_h, sz,
+                                    out=pool[(ci + 1) % 2]
+                                )
 
-                    if getattr(self, 'ort_session', None) is not None:
-                        # === ONNX Runtime 엔진 사용 ===
-                        input_name = self.ort_session.get_inputs()[0].name
-                        chunk_conf, chunk_idx = [], []
-                        # ONNX도 일시적 VRAM 초과 방지를 위해 미니배치 단위로 추론
-                        for mb_start in range(0, len(valid_rois), MINI_BATCH):
-                            mb_rois = np.ascontiguousarray(valid_rois[mb_start:mb_start + MINI_BATCH])
-                            ort_out = self.ort_session.run(None, {input_name: mb_rois})[0]
-                            # NumPy로 Softmax 계산
-                            max_out = np.max(ort_out, axis=1, keepdims=True)
-                            exp_out = np.exp(ort_out - max_out)
-                            probs = exp_out / np.sum(exp_out, axis=1, keepdims=True)
-                            chunk_conf.append(np.max(probs, axis=1))
-                            chunk_idx.append(np.argmax(probs, axis=1))
-                        
-                        conf_arr = np.concatenate(chunk_conf) if chunk_conf else np.array([])
-                        idx_arr = np.concatenate(chunk_idx) if chunk_idx else np.array([])
-                    else:
-                        # === 기존 PyTorch 엔진 사용 ===
-                        batch_tensor = torch.from_numpy(
-                            np.ascontiguousarray(valid_rois)
-                        ).to(self._device, non_blocking=True)
+                            if n_valid == 0:
+                                continue
 
-                        if use_fp16:
-                            batch_tensor = batch_tensor.half()
+                            valid_rois = roi_chw[:n_valid]
 
-                        # 미니배치 추론
-                        chunk_conf, chunk_idx = [], []
-                        for mb_start in range(0, len(batch_tensor), MINI_BATCH):
-                            out = self.model(batch_tensor[mb_start:mb_start + MINI_BATCH])
-                            probs = torch.softmax(out.float(), dim=1)
-                            conf, pred_idx = probs.max(dim=1)
-                            chunk_conf.append(conf.cpu().numpy())
-                            chunk_idx.append(pred_idx.cpu().numpy())
+                            ov_sess = getattr(self, "_ort_session_openvino", None)
+                            if self.ort_session is not None or ov_sess is not None:
+                                chunk_conf, chunk_idx = [], []
+                                session = ov_sess if ov_sess is not None else self.ort_session
+                                input_name = session.get_inputs()[0].name
+                                for mb_start in range(0, len(valid_rois), MINI_BATCH):
+                                    mb_rois = valid_rois[mb_start:mb_start + MINI_BATCH]
+                                    ort_out = session.run(None, {input_name: mb_rois})[0]
+                                    pred = np.argmax(ort_out, axis=1)
+                                    max_vals = ort_out[np.arange(len(pred)), pred]
+                                    exp_shifted = np.exp(ort_out - max_vals[:, None])
+                                    chunk_conf.append((1.0 / exp_shifted.sum(axis=1)).astype(np.float32))
+                                    chunk_idx.append(pred)
 
-                        conf_arr = np.concatenate(chunk_conf)
-                        idx_arr = np.concatenate(chunk_idx)
+                                conf_arr = np.concatenate(chunk_conf) if chunk_conf else np.array([])
+                                idx_arr = np.concatenate(chunk_idx) if chunk_idx else np.array([])
+                            else:
+                                batch_tensor = torch.from_numpy(valid_rois).to(
+                                    self._device, non_blocking=True)
 
-                    for k, j in enumerate(valid_in_chunk):
-                        gi = chunk_start + j
-                        all_conf[gi] = conf_arr[k]
-                        all_pred[gi] = idx_arr[k]
-                        valid_mask[gi] = True
+                                if use_fp16:
+                                    batch_tensor = batch_tensor.half()
 
-            # 결과 매핑
+                                chunk_conf, chunk_idx = [], []
+                                with torch.inference_mode():
+                                    for mb_start in range(0, len(batch_tensor), MINI_BATCH):
+                                        out = self.model(batch_tensor[mb_start:mb_start + MINI_BATCH])
+                                        probs = torch.softmax(out.float(), dim=1)
+                                        conf, pred_idx = probs.max(dim=1)
+                                        chunk_conf.append(conf.cpu().numpy())
+                                        chunk_idx.append(pred_idx.cpu().numpy())
+
+                                conf_arr = np.concatenate(chunk_conf)
+                                idx_arr = np.concatenate(chunk_idx)
+
+                            for k, j in enumerate(valid_in_chunk):
+                                gi = chunk_start + j
+                                all_conf[gi] = conf_arr[k]
+                                all_pred[gi] = idx_arr[k]
+                                valid_mask[gi] = True
+                finally:
+                    if gc_was_enabled:
+                        gc.enable()
+
             infos = self._build_infos(areas, peris, rects)
             result_list = [{"label": "Unknown", "confidence": 0.0, **infos[i]} for i in range(n)]
-            
+
             for i in range(n):
                 if valid_mask[i]:
                     label = self.labels[all_pred[i]] if all_pred[i] < len(self.labels) else "Unknown"
@@ -388,7 +674,12 @@ class DeepLearningClassifier:
                     result_list[i]["confidence"] = float(all_conf[i])
 
             elapsed = time.perf_counter() - t0
-            print(f"[DL Classifier] {n}개 contour 분류 완료 (FP16={use_fp16}, Pipeline): {elapsed:.3f}초")
+            if getattr(self, "_ort_session_openvino", None) is not None:
+                backend = f"OpenVINO({self._openvino_device})"
+            else:
+                backend = "ONNX" if self.ort_session is not None else "PyTorch"
+            mode = f"GPU-Crop(L{opt},{backend})" if use_gpu_crop else f"CPU-Pipeline(L{opt},{backend})"
+            print(f"[DL Classifier] {n}개 contour 분류 완료 (mode={mode}, FP16={use_fp16}): {elapsed:.3f}초")
             return result_list
         except Exception as e:
             print(f"[DL Classifier] 배치 추론 오류: {e}")

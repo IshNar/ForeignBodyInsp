@@ -36,6 +36,30 @@ Vial Foreign Body Inspection Program use Rulebased + classification
 
 ---
 
+## OpenVINO 사용 (Level 5 — Galaxy Book 등 Intel Core Ultra)
+
+Intel Core Ultra Series 2 (갤럭시 북5 프로 등)에서는 **ONNX Runtime + OpenVINO Execution Provider**로 CPU / Intel Arc(iGPU) / NPU / AUTO 중에서 장치를 선택해 추론할 수 있습니다.
+
+**조건**
+- **ONNX 모델**만 지원 (`.pth` PyTorch 모델은 Level 5 미지원)
+- Intel Core Ultra 계열 (CPU·Intel Arc·NPU 구성)
+- Windows 11 64비트
+
+**설치**
+1. **ONNX Runtime OpenVINO EP**  
+   `pip install onnxruntime-openvino`  
+   (NVIDIA GPU용과 동시 사용 시 충돌 가능. Intel 전용 PC에서는 `onnxruntime-openvino`만 사용 권장.)
+2. **NPU 사용 시**  
+   Intel NPU 드라이버 설치 후 장치 관리자에 **"Intel(R) NPU Accelerator"** 가 보이면 NPU 장치 선택 가능.
+
+**사용**
+- 설정 → RuleBase 파라미터... → **DL 최적화** 탭 → **Level 5 — OpenVINO (Intel)** 선택  
+- **OpenVINO 장치**에서 **CPU** / **GPU (Intel Arc)** / **NPU** / **AUTO** 중 선택 후 확인  
+- ONNX 모델 로드 후 Level 5 선택 시 선택한 장치로 OpenVINO EP 세션이 생성됩니다. 실패 시 자동으로 Level 4로 폴백됩니다.  
+- 최고 속도는 모델·환경에 따라 다르므로, CPU/GPU/NPU/AUTO를 각각 벤치마크해 선택하는 것을 권장합니다.
+
+---
+
 ## 재시작 (Ctrl+Shift+R)
 
 - 도움말 메뉴 → "재시작 (업데이트 적용)" 또는 **Ctrl+Shift+R**

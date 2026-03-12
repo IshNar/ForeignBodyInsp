@@ -525,6 +525,46 @@
 
 ---
 
+## 📅 2026-02-05 (목) — Classification 성능·메모리 최적화
+
+### [원복] GPU-side crop 시점으로 복구 + DL 최적화 UI 복원
+
+**상황**: TensorRT(Level 5) 도입 후 검사 시간이 2000ms 수준으로 악화됨. 사용자 요청으로 TensorRT 제외, GPU-side crop만 적용된 시점으로 코드·환경 원복 후, 최적화 레벨(0~4) 라디오 버튼만 다시 추가.
+
+**한 일**:
+- PyTorch 2.8.0+cu126 → 2.6.0+cu124 복구, torch-tensorrt·TensorRT 관련 패키지 제거
+- `classification.py`: Level 5 제거, `use_gpu_crop` 조건에서 ONNX 제외(ONNX는 항상 CPU pipeline)
+- 설정 창: 별도 DL 다이얼로그 대신 **RuleBase 파라미터 다이얼로그** 안에 **「DL 최적화」 탭** 추가 (Level 0~4 라디오)
+- `rule_params.json`의 `deep_learning.optimization_level` 저장/로드 복원
+
+---
+
+### [메모리] 검사 루프 메모리 누수·비효율 개선
+
+**상황**: 동영상 반복 재생 시 사이클마다 검사 시간이 미세하게 늘어나는 현상.
+
+**한 일**:
+- **DetectionWorker**: `run()` 종료 시 `_frame_bgr`, `_full_frame_bgr`를 `None`으로 해제 (`finally` 블록)
+- **ThreadPoolExecutor**: `_run_threshold()`에서 매 프레임 생성하던 것을 `_detect_pool` 인스턴스 1개로 캐싱
+- **_on_detection_result**: `full_frame.copy()` 4회 → 1회만 복사 후 `_display_frame_clean`·`current_frame_bgr`는 참조 공유; `current_frame_bgr`의 불필요한 `.copy()` 제거
+- **classify_batch**: 50프레임마다 `gc.collect()` + `torch.cuda.empty_cache()` 호출
+
+---
+
+### [성능] Classification 구간 시간 변동(180~390ms) 완화
+
+**상황**: ONNX CPU pipeline 사용 시 같은 동영상이라도 프레임에 따라 180ms~390ms로 편차가 큼. 영상 멈추면 상대적으로 안정.
+
+**한 일**:
+- **ONNX warmup**: 모델 로드 직후 더미 입력으로 1회 추론 → CUDA workspace 사전 할당
+- **GC 구간 격리**: CPU pipeline 추론 구간에서 `gc.disable()` → 추론 완료 후 `gc.enable()` (추론 중 GC 스파이크 방지)
+- **ONNX softmax bypass**: logits에서 argmax 후 해당 클래스만으로 confidence 계산 (부분 softmax)
+- **ROI 버퍼 풀**: `_extract_rois_chunk`에 `out` 인자 추가, 유효 ROI만 버퍼 앞쪽에 연속으로 채움. 풀 버퍼 2개(`_roi_pool_buffers`)를 스레드와 번갈아 사용해 매 청크 할당·`roi_chw[valid_indices]` 복사 제거
+
+**결과**: 로그 기준 일반 0.09~0.12초, 동일 프레임 0.03초대, 스파이크 0.38초 → 0.24~0.29초 수준으로 완화.
+
+---
+
 ## 📊 주요 기능 요약 (최신)
 
 | 카테고리 | 기능 |
@@ -536,4 +576,4 @@
 | **빌드** | `build_exe.py` (PyInstaller, onnx 제외, **데이터 백업/복원**) |
 | **보안** | **UIPI 우회** (관리자 권한에서도 드래그 앤 드롭 가능) |
 | **설정 파일** | path_config.json, rule_params.json, basler_settings.json |
-| **문서** | Inspection_Pipeline_Flowchart.md, **BugReport.md**, **history.md** |
+| **문서** | Inspection_Pipeline_Flowchart.md, **BugReport.md**, **history.md**, **doc/2026-02-05_Classification_Optimization.md** |

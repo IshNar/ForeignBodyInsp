@@ -288,13 +288,14 @@ class RuleParamsDialog(QDialog):
     """
 
     def __init__(self, parent=None, rule_based=None, app_root="",
-                 bubble_params=None, source_frame=None):
+                 bubble_params=None, source_frame=None, dl_classifier=None):
         super().__init__(parent)
         self.rule_based = rule_based or RuleBasedClassifier()
         self.bubble_params = bubble_params or BubbleDetectorParams()
         self.app_root = app_root or os.path.dirname(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         self._source_frame: np.ndarray | None = source_frame
+        self._dl_classifier = dl_classifier
         self._debug_images: dict[str, np.ndarray] = {}
 
         self._debounce_timer = QTimer(self)
@@ -305,7 +306,7 @@ class RuleParamsDialog(QDialog):
         self._worker: DebugDetectionWorker | None = None
         self._worker_pending = False
 
-        self.setWindowTitle("RuleBase / Bubble 검출 파라미터")
+        self.setWindowTitle("Inspection Parameters")
         self.resize(1200, 720)
         self._build_ui()
         self._form_from_params(self.rule_based.get_params())
@@ -817,6 +818,74 @@ class RuleParamsDialog(QDialog):
         bub_tab_layout.addWidget(bub_scroll)
         tabs.addTab(bub_tab, "Bubble 검출")
 
+        # ── 탭 3: DL 최적화 ──
+        dl_tab = QWidget()
+        dl_layout = QVBoxLayout(dl_tab)
+
+        dl_group = QGroupBox("DeepLearning 추론 최적화")
+        dl_group_layout = QVBoxLayout(dl_group)
+
+        DL_OPT_LEVELS = [
+            ("Level 0 — CPU Pipeline", "원래 방식: CPU에서 crop → GPU 전송"),
+            ("Level 1 — GPU Crop", "프레임 1장만 GPU 전송, GPU에서 crop/resize"),
+            ("Level 2 — + torch.compile", "커널 퓨전으로 추론 20~40% 향상"),
+            ("Level 3 — + 배치 사전할당", "torch.cat 오버헤드 제거"),
+            ("Level 4 — + grid_sample", "F.grid_sample로 crop 루프 완전 제거"),
+            ("Level 5 — OpenVINO (Intel)", "ONNX + OpenVINO EP. 장치는 아래에서 선택 (CPU/GPU/NPU/AUTO)."),
+        ]
+
+        self._dl_radios = []
+        current_level = 0
+        if self._dl_classifier is not None:
+            current_level = self._dl_classifier.get_optimization_level()
+
+        for i, (name, desc) in enumerate(DL_OPT_LEVELS):
+            radio = QRadioButton(name)
+            radio.setToolTip(desc)
+            radio.setChecked(i == current_level)
+            radio.toggled.connect(self._on_dl_level_toggled)
+            dl_group_layout.addWidget(radio)
+            desc_label = QLabel(f"  <i style='color:#888;'>{desc}</i>")
+            desc_label.setTextFormat(Qt.TextFormat.RichText)
+            dl_group_layout.addWidget(desc_label)
+            self._dl_radios.append(radio)
+
+        # OpenVINO 장치 선택 (Level 5일 때만 표시)
+        self._openvino_device_group = QGroupBox("OpenVINO 장치")
+        openvino_layout = QVBoxLayout(self._openvino_device_group)
+        OPENVINO_DEVICES = [
+            ("CPU", "CPU 추론. 호환성·디버깅에 유리."),
+            ("GPU", "Intel Arc(iGPU) 추론. 처리량·배치 속도에 유리한 경우 많음."),
+            ("NPU", "Intel NPU 추론. 저전력·발열·배터리·상시 추론에 유리."),
+            ("AUTO", "OpenVINO가 작업에 맞는 장치를 자동 선택."),
+        ]
+        self._openvino_device_radios = []
+        current_ov_device = "AUTO"
+        if self._dl_classifier is not None:
+            current_ov_device = self._dl_classifier.get_openvino_device()
+        for dev_key, dev_desc in OPENVINO_DEVICES:
+            rb = QRadioButton(dev_key)
+            rb.setToolTip(dev_desc)
+            rb.setChecked(dev_key == current_ov_device)
+            openvino_layout.addWidget(rb)
+            self._openvino_device_radios.append((dev_key, rb))
+        self._openvino_device_group.setVisible(current_level == 5)
+        dl_group_layout.addWidget(self._openvino_device_group)
+
+        note = QLabel(
+            "<br><b>참고:</b> Level 1~4는 <b>PyTorch + CUDA</b> 모델에서만 적용됩니다.<br>"
+            "ONNX: Level 0~4는 CPU/CUDA, <b>Level 5는 OpenVINO EP</b> (CPU/GPU/NPU/AUTO).<br>"
+            "Level 5 사용 시 <code>pip install onnxruntime-openvino</code> 권장."
+        )
+        note.setTextFormat(Qt.TextFormat.RichText)
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #666; font-size: 11px;")
+        dl_group_layout.addWidget(note)
+
+        dl_layout.addWidget(dl_group)
+        dl_layout.addStretch()
+        tabs.addTab(dl_tab, "DL 최적화")
+
         splitter.addWidget(right_panel)
 
         splitter.setStretchFactor(0, 3)
@@ -1150,6 +1219,10 @@ class RuleParamsDialog(QDialog):
         data = {
             "classification": self._form_to_params(),
             "bubble_detection": self._bubble_to_params(),
+            "deep_learning": {
+                "optimization_level": self.get_dl_optimization_level(),
+                "openvino_device": self.get_openvino_device(),
+            },
         }
         try:
             with open(path, "w", encoding="utf-8") as f:
@@ -1175,23 +1248,56 @@ class RuleParamsDialog(QDialog):
                 self._form_from_params(data)
             if "bubble_detection" in data:
                 self._bubble_from_params(data["bubble_detection"])
+            if "deep_learning" in data:
+                dl = data["deep_learning"]
+                dl_level = dl.get("optimization_level", 0)
+                dl_level = min(max(0, dl_level), len(self._dl_radios) - 1)
+                self._dl_radios[dl_level].setChecked(True)
+                ov_dev = dl.get("openvino_device", "AUTO")
+                for dev_key, rb in self._openvino_device_radios:
+                    rb.setChecked(dev_key == ov_dev)
+                self._on_dl_level_toggled()
             QMessageBox.information(self, "불러오기 완료",
                                     "파라미터를 적용했습니다. '확인'을 누르면 검사에 반영됩니다.")
         except Exception as e:
             QMessageBox.warning(self, "불러오기 실패", str(e))
 
+    def get_dl_optimization_level(self) -> int:
+        for i, radio in enumerate(self._dl_radios):
+            if radio.isChecked():
+                return i
+        return 0
+
+    def get_openvino_device(self) -> str:
+        """Level 5일 때 선택된 OpenVINO 장치 (CPU/GPU/NPU/AUTO)."""
+        for dev_key, rb in self._openvino_device_radios:
+            if rb.isChecked():
+                return dev_key
+        return "AUTO"
+
+    def _on_dl_level_toggled(self):
+        """Level 5 선택 시 OpenVINO 장치 그룹만 표시."""
+        self._openvino_device_group.setVisible(self.get_dl_optimization_level() == 5)
+
     def _on_ok(self):
         self.rule_based.set_params(self._form_to_params())
         self.bubble_params.set_params(self._bubble_to_params())
+        if self._dl_classifier is not None:
+            self._dl_classifier.set_optimization_level(self.get_dl_optimization_level())
+            self._dl_classifier.set_openvino_device(self.get_openvino_device())
         self._auto_save()
         self.accept()
 
     def _auto_save(self):
-        """rule_params.json에 현재 파라미터를 자동 저장 (앱 재시작 시 복원). MainWindow에서도 동일 경로로 한 번 더 저장함."""
+        """rule_params.json에 현재 파라미터를 자동 저장 (앱 재시작 시 복원)."""
         path = _default_rule_params_path(self.app_root)
         data = {
             "classification": self._form_to_params(),
             "bubble_detection": self._bubble_to_params(),
+            "deep_learning": {
+                "optimization_level": self.get_dl_optimization_level(),
+                "openvino_device": self.get_openvino_device(),
+            },
         }
         try:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)

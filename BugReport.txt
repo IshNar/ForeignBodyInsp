@@ -30,3 +30,22 @@ Vial Foreign Body Inspection System — 버그 리포트 (요약)
   - VIEWER_MODE_LAYOUT_TROUBLESHOOTING.md
 
 ================================================================================
+
+[2026-02-05] Classification 사용 시 검사 시간 변동·메모리 이슈
+
+■ 버그 내용
+  - 동영상 반복 검사 시 사이클마다 검사 시간이 미세하게 늘어나는 느낌.
+  - Classification(ONNX) 사용 시 180ms~390ms 편차. 영상 멈추면 상대적으로 안정.
+
+■ 해결 요약
+  1) 메모리: Worker 프레임 버퍼 사용 후 해제, ThreadPoolExecutor 캐싱,
+            _on_detection_result 불필요한 .copy() 제거, 50프레임마다 gc+cuda 정리
+  2) 시간 변동: ONNX warmup, 추론 구간 gc.disable/enable, ROI 버퍼 풀 2개 재사용
+
+■ 수정 파일
+  - src/core/classification.py, src/ui/main_window.py
+
+■ 상세
+  - doc/2026-02-05_Classification_Optimization.md
+
+================================================================================

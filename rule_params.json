@@ -1,7 +1,7 @@
 {
   "classification": {
     "noise_contrast_threshold": 22,
-    "threshold": 163,
+    "threshold": 166,
     "min_area": 8,
     "use_adaptive": true,
     "open_kernel": 3,
@@ -32,5 +32,8 @@
     "circularity_min": 0.35,
     "solidity_min": 0.7,
     "max_aspect_ratio": 2.2
+  },
+  "deep_learning": {
+    "optimization_level": 4
   }
 }
