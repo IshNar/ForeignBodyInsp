@@ -114,12 +114,21 @@ class BaslerSettingsDialog(QDialog):
         }
 
     def load_from_camera(self):
-        if self.basler is None or not self.basler.is_connected():
-            QMessageBox.warning(self, "오류", "Basler 카메라가 연결되어 있지 않습니다.")
-            return
-        params = self.basler.get_parameters_dict()
-        self._params_to_ui(params)
-        QMessageBox.information(self, "로드 완료", "카메라에서 현재 설정을 읽었습니다.")
+        try:
+            if self.basler is None or not self.basler.is_connected():
+                QMessageBox.warning(self, "오류", "Basler 카메라가 연결되어 있지 않습니다.")
+                return
+            params = self.basler.get_parameters_dict()
+            if not params:
+                QMessageBox.warning(self, "오류", "카메라에서 설정을 읽어오지 못했습니다.")
+                return
+            self._params_to_ui(params)
+            QMessageBox.information(self, "로드 완료", "카메라에서 현재 설정을 읽었습니다.")
+        except Exception as e:
+            print(f"BaslerSettingsDialog.load_from_camera exception: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(self, "오류", f"카메라 설정을 불러오는 동안 오류가 발생했습니다.\n{e}")
 
     def apply_to_camera(self):
         if self.basler is None or not self.basler.is_connected():
@@ -127,6 +136,35 @@ class BaslerSettingsDialog(QDialog):
             return
         params = self._ui_to_params()
         self.basler.set_parameters_dict(params)
+
+        # 적용 후 다시 읽어서 실제 반영 상황 확인
+        try:
+            applied = self.basler.get_parameters_dict()
+            if applied:
+                self._params_to_ui(applied)
+
+            if "ExposureTime" in params and "ExposureTime" in applied:
+                requested = float(params["ExposureTime"])
+                actual = float(applied["ExposureTime"])
+                if abs(actual - requested) > 1.0:
+                    QMessageBox.warning(
+                        self,
+                        "적용 경고",
+                        f"ExposureTime이 요청값 {requested}μs로 설정되지 않았습니다.\n현재 {actual}μs입니다."
+                    )
+                else:
+                    QMessageBox.information(
+                        self,
+                        "적용 확인",
+                        f"ExposureTime이 {actual}μs로 정상 적용되었습니다."
+                    )
+        except Exception as e:
+            print(f"BaslerSettingsDialog.apply_to_camera exception: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(self, "오류", f"적용 후 값 확인 중 오류가 발생했습니다.\n{e}")
+            return
+
         QMessageBox.information(self, "적용 완료", "설정을 카메라에 적용했습니다.")
 
     def save_to_file(self):

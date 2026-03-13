@@ -4,6 +4,8 @@ import json
 import numpy as np
 import os
 import sys
+import time
+import shutil
 import concurrent.futures
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QPushButton, QSlider, QCheckBox, QFileDialog,
@@ -297,6 +299,8 @@ class MainWindow(QMainWindow):
         self.is_inspecting = False
         self._worker_busy = False
         self._detection_worker = DetectionWorker(self)
+        self._capture_time_prev = None
+        self._capture_fps_est = 30.0
         self._detection_worker.result_ready.connect(self._on_detection_result)
         self._detection_worker.finished.connect(self._on_worker_finished)
         self._display_frame_clean = None
@@ -328,6 +332,8 @@ class MainWindow(QMainWindow):
         self._timer_interval = 33      # 타이머 간격 백업
         self._user_paused = False      # 사용자 Pause 여부 (Resume/Stop 시 False)
         self._last_annotation_label = None  # 어노테이션 ROI 다이얼로그에서 마지막 선택한 라벨
+        self._file_playback_recording = False  # 재생 버튼으로 파일 저장 중인지 플래그
+        self._file_video_path = None  # 재생 저장 대상 경로
 
         self.init_ui()
         self._load_settings()
@@ -1133,15 +1139,41 @@ class MainWindow(QMainWindow):
         return isinstance(self.camera, BaslerCamera) and self.camera.is_connected()
 
     def _update_basler_ui_state(self):
-        """Basler 연결 상태에 따라 버튼 텍스트·설정 버튼 활성화 갱신."""
+        """Basler 또는 FileCamera를 위한 버튼 활성화 상태 갱신."""
         is_conn = self._is_basler_connected()
+        is_file_video = isinstance(self.camera, FileCamera) and self.camera.is_video()
         if is_conn:
             self.btn_connect_cam.setText("Disconnect Basler Camera")
         else:
             self.btn_connect_cam.setText("Connect Basler Camera")
         self.btn_basler_settings.setEnabled(is_conn)
         self.btn_grab_image.setEnabled(is_conn)
-        self.chk_save_video.setEnabled(is_conn)
+        # FileVideo 재생 시에도 저장 체크박스를 사용할 수 있도록 함.
+        self.chk_save_video.setEnabled(is_conn or is_file_video)
+
+    def _handle_camera_disconnect(self, msg=None):
+        """Basler가 강제 연결 해제/오류 시 안전하게 정리하고 UI 갱신."""
+        if getattr(self, 'video_writer', None) is not None:
+            self._finalize_video_recording()
+
+        if self.camera is not None:
+            try:
+                self.camera.close()
+            except Exception:
+                pass
+            self.camera = None
+
+        self.timer.stop()
+        self.video_slider.hide()
+        self._user_paused = False
+
+        if msg:
+            self.lbl_status.setText(msg)
+        else:
+            self.lbl_status.setText("Camera Disconnected")
+
+        self._update_basler_ui_state()
+        self._update_play_buttons()
 
     def _on_grab_image(self):
         """Basler 카메라에서 프레임 1장 Grab 하여 저장"""
@@ -1348,22 +1380,51 @@ class MainWindow(QMainWindow):
         """Stop: 타이머 정지 + 동영상이면 처음으로. Play: 타이머 재시작."""
         if not self._has_playable_source():
             return
+
         if self.timer.isActive() or self._user_paused:
+            # Stop 눌렀을 때 녹화 종료 (재생 중/일시정지 상태에서)
             self.timer.stop()
             self._user_paused = False
             if isinstance(self.camera, FileCamera) and self.camera.is_video() and getattr(self.camera, "cap", None) is not None:
                 self.camera.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+            if getattr(self, "_file_playback_recording", False):
+                self._finalize_video_recording()
+
             self._update_play_buttons()
         else:
+            # Play 눌렀을 때 재생 및 녹화 시작
             self.timer.start(self._timer_interval)
+            if self.chk_save_video.isChecked():
+                import datetime
+                now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                if isinstance(self.camera, FileCamera) and self.camera.is_video():
+                    video_dir = os.path.join(self.DEFAULT_IMAGE_FOLDER, "File Video File")
+                    os.makedirs(video_dir, exist_ok=True)
+                    self._file_video_path = os.path.join(video_dir, f"{now_str}.avi")
+                    self._file_playback_recording = True
+                    print(f"[on_stop_play] FileCamera playback recording enabled: {self._file_video_path}")
+                elif self._is_basler_connected():
+                    video_dir = os.path.join(self.DEFAULT_IMAGE_FOLDER, "Basler Video File")
+                    os.makedirs(video_dir, exist_ok=True)
+                    self._current_video_path = os.path.join(video_dir, f"{now_str}.avi")
+                    self._file_playback_recording = True
+                    print(f"[on_stop_play] Basler playback recording enabled: {self._current_video_path}")
+
             self._update_play_buttons()
 
     def _open_basler_settings(self):
         if not self._is_basler_connected():
             QMessageBox.warning(self, "오류", "Basler 카메라를 먼저 연결하세요.")
             return
-        dlg = BaslerSettingsDialog(self.camera, self)
-        dlg.exec()
+        try:
+            dlg = BaslerSettingsDialog(self.camera, self)
+            dlg.exec()
+        except Exception as e:
+            print(f"Failed to open Basler settings dialog: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(self, "오류", f"Basler 설정 대화상자를 열 수 없습니다.\n{e}")
 
     def toggle_inspection(self):
         if self.btn_start.isChecked():
@@ -1398,18 +1459,35 @@ class MainWindow(QMainWindow):
             self.lbl_status.setText("Stopped")
             
             # --- 영상 저장 종료 ---
-            if getattr(self, "video_writer", None) is not None:
+            self._finalize_video_recording()
+
+    def _finalize_video_recording(self):
+        """VideoWriter를 마감하고 temp_video.avi를 최종 위치로 이동."""
+        if getattr(self, "video_writer", None) is not None:
+            try:
                 self.video_writer.release()
-                self.video_writer = None
-                if getattr(self, "_current_video_path", None):
-                    import shutil
-                    temp_path = os.path.join(self._app_root(), "temp_video.avi")
-                    if os.path.exists(temp_path):
-                        try:
-                            shutil.move(temp_path, self._current_video_path)
-                            print(f"영상 저장 완료: {self._current_video_path}")
-                        except Exception as e:
-                            print(f"영상 파일 이동 실패: {e}")
+            except Exception:
+                pass
+            self.video_writer = None
+
+        dst_path = None
+        if getattr(self, "_current_video_path", None):
+            dst_path = self._current_video_path
+        elif getattr(self, "_file_video_path", None):
+            dst_path = self._file_video_path
+
+        if dst_path:
+            temp_path = os.path.join(self._app_root(), "temp_video.avi")
+            if os.path.exists(temp_path):
+                try:
+                    shutil.move(temp_path, dst_path)
+                    print(f"영상 저장 완료: {dst_path}")
+                except Exception as e:
+                    print(f"영상 파일 이동 실패: {e}")
+
+        self._current_video_path = None
+        self._file_video_path = None
+        self._file_playback_recording = False
 
     def _on_worker_finished(self):
         """QThread가 완전히 종료된 후 호출. _worker_busy 해제."""
@@ -1756,7 +1834,7 @@ class MainWindow(QMainWindow):
         total_h = row1_h + row2_h
         # 두 줄 높이 안에 맞춤: 로고 3배·글자 2배 느낌 유지
         base_logo_h = max((total_h - 16) // 2, 24)
-        logo_h = min(base_logo_h * 3, total_h - 12)
+        logo_h = min(base_logo_h * 5, total_h)
         base_font_px = max(12, (total_h - 16) // 2)
         font_px = min(base_font_px * 2, total_h - 8)
         self.header_title_label.setStyleSheet(
@@ -1781,7 +1859,7 @@ class MainWindow(QMainWindow):
         bw = self._tab_branding.sizeHint().width()
         bh = max(self._tab_branding.sizeHint().height(), total_h)
         w = self.width()
-        x = max(0, (w - bw) // 2) + 120
+        x = max(0, (w - bw) // 2) - 10
         y = 0
         self._tab_branding.setGeometry(x, y, bw, total_h)
         self._tab_branding.raise_()
@@ -2018,14 +2096,70 @@ class MainWindow(QMainWindow):
     def update_frame(self):
         if self.camera is None:
             return
-        frame = self.camera.grab_frame()
-        if frame is None:
+
+        try:
+            frame = self.camera.grab_frame()
+        except Exception as e:
+            print(f"[update_frame] camera.grab_frame 예외: {e}")
+            import traceback
+            traceback.print_exc()
+            self._handle_camera_disconnect("Camera Error")
             return
-            
-        # --- 실시간 영상 녹화 (is_inspecting 상태일 때) ---
-        if getattr(self, "is_inspecting", False) and getattr(self, "_current_video_path", None):
+
+        if frame is None:
+            # Basler 카메라일 때 잡혔더라도 연결이 끊어진 경우 처리
+            if self._is_basler_connected():
+                return
+            self._handle_camera_disconnect("Camera Disconnected")
+            return
+
+        # 프레임 간격으로 실제 캡처 FPS 추정 (Basler 등에서 8fps를 알아내기 위해)
+        now_t = time.time()
+        if self._capture_time_prev is not None:
+            elapsed = now_t - self._capture_time_prev
+            if elapsed > 0:
+                instant_fps = 1.0 / elapsed
+                self._capture_fps_est = self._capture_fps_est * 0.9 + instant_fps * 0.1
+        self._capture_time_prev = now_t
+
+        # 파일 재생 + 저장 체크박스일 때 자동으로 녹화 상태 활성화
+        if isinstance(self.camera, FileCamera) and self.camera.is_video() and self.chk_save_video.isChecked():
+            if not getattr(self, "_file_playback_recording", False):
+                # 재생 중이 압니까? (타이머가 돌아가면 update_frame 호출 중)
+                self._file_playback_recording = True
+                if not getattr(self, "_file_video_path", None):
+                    import datetime
+                    now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    video_dir = os.path.join(self.DEFAULT_IMAGE_FOLDER, "File Video File")
+                    os.makedirs(video_dir, exist_ok=True)
+                    self._file_video_path = os.path.join(video_dir, f"{now_str}.avi")
+                print(f"[update_frame] File playback recording started: {self._file_video_path}")
+        else:
+            # 녹화 옵션 해제 시 녹화 종료
+            if getattr(self, "_file_playback_recording", False) and not self.chk_save_video.isChecked():
+                self._finalize_video_recording()
+
+        # --- 실시간 영상 녹화 (is_inspecting 또는 파일 재생 녹화 상태) ---
+        if (getattr(self, "is_inspecting", False) and getattr(self, "_current_video_path", None)) or getattr(self, "_file_playback_recording", False):
             if getattr(self, "video_writer", None) is None:
-                fps = 30.0 # 기본 30fps
+                fps = 30.0  # 기본 30fps
+                # 파일 재생의 실제 FPS 확보
+                if isinstance(self.camera, FileCamera) and self.camera.is_video() and getattr(self.camera, "cap", None) is not None:
+                    try:
+                        cap_fps = float(self.camera.cap.get(cv2.CAP_PROP_FPS))
+                        if cap_fps > 0:
+                            fps = cap_fps
+                    except Exception:
+                        pass
+                # Basler의 실제 캡처 FPS 측정값 사용
+                elif self._is_basler_connected() and self._capture_fps_est > 0:
+                    fps = self._capture_fps_est
+                # (Fallback) 타이머 간격
+                elif self.timer.interval() > 0:
+                    fps = 1000.0 / max(1, self.timer.interval())
+
+                fps = max(1.0, min(fps, 120.0))
+
                 h, w = frame.shape[:2]
                 fourcc = cv2.VideoWriter_fourcc(*'XVID')
                 is_color = len(frame.shape) == 3

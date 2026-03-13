@@ -1,7 +1,7 @@
 {
   "classification": {
     "noise_contrast_threshold": 22,
-    "threshold": 166,
+    "threshold": 105,
     "min_area": 8,
     "use_adaptive": true,
     "open_kernel": 3,
@@ -23,8 +23,8 @@
     "bilateral_sigmaColor": 25.0,
     "bilateral_sigmaSpace": 25.0,
     "sigma_small": 0.7,
-    "sigma_large": 10.0,
-    "thr_k": 5.5,
+    "sigma_large": 9.5,
+    "thr_k": 4.0,
     "morph_close_size": 3,
     "morph_open_size": 3,
     "min_diameter": 8,

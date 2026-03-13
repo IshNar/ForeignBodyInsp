@@ -112,63 +112,170 @@ class BaslerCamera(CameraSource):
     def set_exposure(self, value):
         if self.camera and self.camera.IsOpen():
             try:
-                self.camera.ExposureAuto.SetValue("Off")
-                self.camera.ExposureTime.SetValue(float(value))
+                self._safe_set_property("ExposureAuto", "Off")
+                self._safe_set_property("ExposureTime", float(value))
             except Exception as e:
                 print(f"Error setting exposure: {e}")
 
     def get_exposure(self):
         if self.camera and self.camera.IsOpen():
             try:
-                return self.camera.ExposureTime.GetValue()
+                val = self._safe_get_property("ExposureTime")
+                return float(val) if val is not None else 0
             except Exception:
                 return 0
         return 0
+
+    def _has_property(self, name: str) -> bool:
+        if self.camera is None or not self.camera.IsOpen():
+            return False
+        try:
+            return hasattr(self.camera, name)
+        except Exception as e:
+            print(f"BaslerCamera._has_property({name}) failed: {e}")
+            return False
+
+    def _resolve_property_name(self, name: str) -> str:
+        if name == "ExposureTime":
+            for opt in ["ExposureTime", "ExposureTimeAbs", "ExposureTimeRaw"]:
+                if self._has_property(opt): return opt
+        elif name == "Gain":
+            for opt in ["Gain", "GainAbs", "GainRaw"]:
+                if self._has_property(opt): return opt
+        return name
+
+    def _safe_get_property(self, name: str):
+        real_name = self._resolve_property_name(name)
+        if not self._has_property(real_name):
+            return None
+        try:
+            prop = getattr(self.camera, real_name)
+        except Exception as e:
+            print(f"BaslerCamera._safe_get_property({name}): getattr failed: {e}")
+            return None
+        try:
+            if hasattr(prop, "GetValue"):
+                return prop.GetValue()
+        except Exception as e:
+            print(f"BaslerCamera._safe_get_property({name}) failed: {e}")
+        return None
+
+    def _safe_set_property(self, name: str, value) -> bool:
+        real_name = self._resolve_property_name(name)
+        if not self._has_property(real_name):
+            print(f"BaslerCamera._safe_set_property({name}): property missing (resolved: {real_name})")
+            return False
+        try:
+            prop = getattr(self.camera, real_name)
+        except Exception as e:
+            print(f"BaslerCamera._safe_set_property({name}): getattr failed: {e}")
+            return False
+
+        try:
+            if hasattr(prop, "IsWritable") and not prop.IsWritable():
+                print(f"BaslerCamera._safe_set_property({name}): property not writable")
+                return False
+        except Exception as e:
+            print(f"BaslerCamera._safe_set_property({name}): IsWritable check failed: {e}")
+            return False
+
+        # ExposureTime/Gain 값이 제한 범위 안에 있도록 정밀하게 조정
+        try:
+            if name in ("ExposureTime", "Gain") and hasattr(prop, "GetMin") and hasattr(prop, "GetMax") and hasattr(prop, "GetInc"):
+                min_v = prop.GetMin()
+                max_v = prop.GetMax()
+                inc = prop.GetInc()
+                
+                # Raw의 경우 정수형 처리, 아닐 경우 float
+                is_raw = "Raw" in real_name
+                if is_raw:
+                    value = int(float(value))
+                    min_v, max_v, inc = int(min_v), int(max_v), int(inc)
+                else:
+                    value = float(value)
+                    
+                if value < min_v:
+                    value = min_v
+                elif value > max_v:
+                    value = max_v
+                if inc > 0:
+                    value = min_v + round((value - min_v) / inc) * inc
+                    
+                if is_raw:
+                    value = int(value)
+        except Exception as e:
+            print(f"BaslerCamera._safe_set_property({name}) range adjust failed: {e}")
+
+        try:
+            if hasattr(prop, "SetValue"):
+                print(f"BaslerCamera._safe_set_property: setting {real_name} to {value}")
+                prop.SetValue(value)
+                # 읽어서 값 확인
+                actual = None
+                try:
+                    if hasattr(prop, "GetValue"):
+                        actual = prop.GetValue()
+                        print(f"BaslerCamera._safe_set_property: {real_name} actual after set = {actual}")
+                except Exception as e2:
+                    print(f"BaslerCamera._safe_set_property: {real_name} GetValue after set failed: {e2}")
+                if actual is not None and float(actual) != float(value):
+                    print(f"BaslerCamera._safe_set_property: {real_name} set mismatch: requested={value}, actual={actual}")
+                return True
+        except Exception as e:
+            print(f"BaslerCamera._safe_set_property({name}) failed: {e}")
+        return False
 
     def get_parameters_dict(self):
         out = {}
         if not self.camera or not self.camera.IsOpen():
             return out
-        try:
-            out["ExposureTime"] = self.camera.ExposureTime.GetValue()
-        except Exception:
-            pass
-        try:
-            out["Gain"] = self.camera.Gain.GetValue()
-        except Exception:
-            pass
-        try:
-            out["ExposureAuto"] = str(self.camera.ExposureAuto.GetValue()) if hasattr(self.camera.ExposureAuto, "GetValue") else "Off"
-        except Exception:
-            pass
-        try:
-            out["GainAuto"] = str(self.camera.GainAuto.GetValue()) if hasattr(self.camera.GainAuto, "GetValue") else "Off"
-        except Exception:
-            pass
+
+        exposure = self._safe_get_property("ExposureTime")
+        if exposure is not None:
+            out["ExposureTime"] = exposure
+
+        gain = self._safe_get_property("Gain")
+        if gain is not None:
+            out["Gain"] = gain
+
+        exposure_auto = self._safe_get_property("ExposureAuto")
+        if exposure_auto is not None:
+            out["ExposureAuto"] = str(exposure_auto)
+
+        gain_auto = self._safe_get_property("GainAuto")
+        if gain_auto is not None:
+            out["GainAuto"] = str(gain_auto)
+
         return out
 
     def set_parameters_dict(self, params: dict):
         if not self.camera or not self.camera.IsOpen():
+            print("BaslerCamera.set_parameters_dict: camera not open")
             return
+
+        # 변화를 적용하기 전에 프레임 스트리밍 일시 중지
+        was_grabbing = False
         try:
-            if "ExposureAuto" in params and hasattr(self.camera, "ExposureAuto"):
-                self.camera.ExposureAuto.SetValue(str(params["ExposureAuto"]))
+            was_grabbing = self.camera.IsGrabbing()
+            if was_grabbing:
+                self.camera.StopGrabbing()
         except Exception as e:
-            print(f"Set ExposureAuto: {e}")
+            print(f"BaslerCamera.set_parameters_dict: stop grabbing failed: {e}")
+
+        if "ExposureAuto" in params:
+            self._safe_set_property("ExposureAuto", str(params["ExposureAuto"]))
+        if "GainAuto" in params:
+            self._safe_set_property("GainAuto", str(params["GainAuto"]))
+        if "ExposureTime" in params:
+            self._safe_set_property("ExposureAuto", "Off")
+            self._safe_set_property("ExposureTime", float(params["ExposureTime"]))
+        if "Gain" in params:
+            self._safe_set_property("GainAuto", "Off")
+            self._safe_set_property("Gain", float(params["Gain"]))
+
+        # 변경 후에 스트리밍 다시 시작
         try:
-            if "GainAuto" in params and hasattr(self.camera, "GainAuto"):
-                self.camera.GainAuto.SetValue(str(params["GainAuto"]))
+            if was_grabbing and not self.camera.IsGrabbing():
+                self.camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
         except Exception as e:
-            print(f"Set GainAuto: {e}")
-        try:
-            if "ExposureTime" in params:
-                self.camera.ExposureAuto.SetValue("Off")
-                self.camera.ExposureTime.SetValue(float(params["ExposureTime"]))
-        except Exception as e:
-            print(f"Set ExposureTime: {e}")
-        try:
-            if "Gain" in params:
-                self.camera.GainAuto.SetValue("Off")
-                self.camera.Gain.SetValue(float(params["Gain"]))
-        except Exception as e:
-            print(f"Set Gain: {e}")
+            print(f"BaslerCamera.set_parameters_dict: restart grabbing failed: {e}")
